@@ -20,7 +20,11 @@ impl Qr {
     }
 
     fn dark(&self, x: usize, y: usize) -> bool {
-        let (x, y) = (x.wrapping_sub(QUIET), y.wrapping_sub(QUIET));
+        self.module(x.wrapping_sub(QUIET), y.wrapping_sub(QUIET))
+    }
+
+    /// Whether module (x, y) is dark; anything outside the code is light.
+    pub fn module(&self, x: usize, y: usize) -> bool {
         x < self.width && y < self.width && self.modules[y * self.width + x]
     }
 }

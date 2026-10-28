@@ -1,3 +1,9 @@
-/target/
+/target
+/host/target
+/ui/target
+# Flash dumps hold the badge's Wi-Fi password; see scripts/backup.sh.
 /backups/
+# Per-user details; see badge.example.toml.
+/badge.toml
+/private/
 /.wifi-password

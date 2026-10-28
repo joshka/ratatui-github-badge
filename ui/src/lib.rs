@@ -6,6 +6,7 @@
 
 extern crate alloc;
 
+pub mod config;
 pub mod maze;
 pub mod mirror;
 pub mod qr;
@@ -81,13 +82,6 @@ const DEMO: [(usize, usize, u32); 11] = [
     (PAGE_GET, 1, 6000),
 ];
 
-const MOODS: [&str; 4] = [
-    "Ask me about Ratatui",
-    "Come see the Ratatui booth",
-    "Let's build a TUI",
-    "Open to chat",
-];
-pub const CONTACT_LABELS: [&str; 3] = ["Save contact", "github.com/ferris", "ratatui.rs"];
 const SUBTABS: [&str; 4] = ["stack", "bars", "gauges", "fx"];
 const STACK: [[&str; 3]; 7] = [
     ["ratatui", "0.30", "widgets, layout, text"],
@@ -95,7 +89,7 @@ const STACK: [[&str; 3]; 7] = [
     ["tachyonfx", "0.25", "cell effects"],
     ["tui-big-text", "0.8", "the big letters"],
     ["embassy-rp", "0.10", "async runtime + HAL"],
-    ["RP2350B", "150MHz", "2x Cortex-M33, 520K RAM"],
+    ["RP2350B", "200MHz", "2x Cortex-M33, 520K RAM"],
     ["ST7789", "320x240", "8-bit parallel LCD"],
 ];
 const EFFECTS: [&str; 6] = ["coalesce", "dissolve", "sweep", "slide", "hue shift", "explode"];
@@ -106,6 +100,53 @@ const KEY_GLYPHS: [&str; 5] = ["▲", "▼", "◄", "►", "●"];
 pub enum Image {
     Avatar,
     Contact(usize),
+}
+
+/// Contact QR codes are drawn this many pixels square, with a four-module quiet zone.
+const CONTACT_QR_SIDE: u32 = 132;
+
+impl Image {
+    /// Width and height in pixels.
+    pub fn side(self) -> u32 {
+        match self {
+            Image::Avatar => config::AVATAR_SIDE,
+            Image::Contact(_) => CONTACT_QR_SIDE,
+        }
+    }
+
+    /// The RGB565 color around the image, filling the rest of its cell-aligned slot.
+    pub fn background(self) -> u16 {
+        match self {
+            Image::Avatar => 0x0863, // BG
+            Image::Contact(_) => 0xFFFF,
+        }
+    }
+
+    /// The RGB565 pixel at (x, y) in a `w` x `h` slot, with the image centered.
+    pub fn slot_pixel(self, w: u32, h: u32, x: u32, y: u32) -> u16 {
+        let side = self.side();
+        let (x, y) = (x.wrapping_sub(w.saturating_sub(side) / 2), y.wrapping_sub(h.saturating_sub(side) / 2));
+        if x < side && y < side { self.pixel(x, y) } else { self.background() }
+    }
+
+    /// The RGB565 pixel at (x, y), for `x` and `y` below [`Image::side`].
+    pub fn pixel(self, x: u32, y: u32) -> u16 {
+        match self {
+            Image::Avatar => {
+                let data = config::AVATAR.unwrap_or(&[]);
+                let i = ((y * config::AVATAR_SIDE + x) * 2) as usize;
+                data.get(i..i + 2).map_or(0, |b| u16::from_be_bytes([b[0], b[1]]))
+            }
+            Image::Contact(i) => {
+                let code = &config::CONTACTS[i].qr;
+                let modules = code.width as u32 + 8;
+                let scale = (CONTACT_QR_SIDE / modules).max(1);
+                let offset = (CONTACT_QR_SIDE - modules * scale) / 2 + 4 * scale;
+                let module = |p: u32| (p.wrapping_sub(offset) / scale) as usize;
+                if code.module(module(x), module(y)) { 0x0000 } else { 0xFFFF }
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -375,7 +416,7 @@ impl App {
     fn adjust(&mut self, forward: bool) {
         let step = |v: usize, n: usize| if forward { (v + 1) % n } else { (v + n - 1) % n };
         match self.page {
-            PAGE_HERO => self.mood = step(self.mood, MOODS.len()),
+            PAGE_HERO => self.mood = step(self.mood, config::MOODS.len()),
             PAGE_WIDGETS => {
                 self.sub = step(self.sub, SUBTABS.len());
                 let area = widgets_body();
@@ -387,7 +428,7 @@ impl App {
             PAGE_MAZE if forward => self.maze_neutral = MAZE_NEUTRAL,
             PAGE_MAZE => self.maze_neutral = self.screen_gravity(),
             PAGE_GET => self.qr = step(self.qr, 2),
-            PAGE_CONTACT => self.contact = step(self.contact, CONTACT_LABELS.len()),
+            PAGE_CONTACT => self.contact = step(self.contact, config::CONTACTS.len()),
             _ => {}
         }
     }
@@ -688,22 +729,24 @@ impl App {
 
         let panel = Rect::new(36, body.y, 17, 17);
         f.render_widget(
-            Paragraph::new("@ferris").centered().style(Style::new().fg(self.accent()).bold()),
+            Paragraph::new(config::HANDLE).centered().style(Style::new().fg(self.accent()).bold()),
             Rect::new(panel.x, 2, panel.width, 1),
         );
-        let avatar = Rect::new(37, 4, 15, 9);
-        mark_image(f, avatar);
-        self.images.push((Image::Avatar, avatar));
+        if config::AVATAR.is_some() {
+            let avatar = Rect::new(37, 4, 15, 9);
+            mark_image(f, avatar);
+            self.images.push((Image::Avatar, avatar));
+        }
         f.render_widget(
             Paragraph::new(vec![
-                Line::from("Ferris the Crab").bold(),
-                Line::from("maintainer").fg(self.accent()),
+                Line::from(config::NAME).bold(),
+                Line::from(config::ROLE).fg(self.accent()),
                 Line::from(""),
-                Line::from(MOODS[self.mood]).fg(TEXT).italic(),
+                Line::from(config::MOODS[self.mood]).fg(TEXT).italic(),
             ])
             .centered()
             .wrap(Wrap { trim: true }),
-            Rect::new(panel.x, 13, panel.width, 5),
+            Rect::new(panel.x, if config::AVATAR.is_some() { 13 } else { 5 }, panel.width, 5),
         );
 
         f.render_widget(self.wordmark(), wordmark_area(19));
@@ -782,7 +825,7 @@ impl App {
         f.render_widget(
             Sparkline::default()
                 .block(Block::bordered().title(" light ").border_style(accent))
-                .data(&self.light_history)
+                .data(self.light_history)
                 .max(100)
                 .style(Color::Rgb(255, 210, 100)),
             light,
@@ -1010,7 +1053,7 @@ impl App {
         self.images.push((Image::Contact(self.contact), slot));
         f.render_widget(
             Paragraph::new(vec![
-                Line::from(CONTACT_LABELS[self.contact]).fg(accent).bold(),
+                Line::from(config::CONTACTS[self.contact].label).fg(accent).bold(),
                 Line::from("scan with your phone camera").fg(DIM),
             ])
             .centered(),

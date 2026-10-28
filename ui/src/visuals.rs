@@ -98,7 +98,7 @@ pub fn marquee(buf: &mut Buffer, area: Rect, text: &str, offset_cols: usize, col
 pub struct Rng(pub u32);
 
 impl Rng {
-    pub fn next(&mut self) -> u32 {
+    pub fn next_u32(&mut self) -> u32 {
         self.0 ^= self.0 << 13;
         self.0 ^= self.0 >> 17;
         self.0 ^= self.0 << 5;
@@ -125,7 +125,7 @@ impl Fire {
     pub fn step(&mut self, rng: &mut Rng) {
         for x in 0..self.width {
             for y in 1..self.height {
-                let r = rng.next();
+                let r = rng.next_u32();
                 let src = self.heat[y * self.width + x];
                 let drift = (r & 3) as usize;
                 let dst_x = (x + self.width + 1 - drift.min(2)) % self.width;
@@ -192,7 +192,7 @@ impl Life {
             }
         }
         for _ in 0..self.width * self.height / 12 {
-            let i = rng.next() as usize % self.age.len();
+            let i = rng.next_u32() as usize % self.age.len();
             self.age[i] = 1;
         }
     }

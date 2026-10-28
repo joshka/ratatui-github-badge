@@ -33,9 +33,9 @@ use embassy_rp::{
 use embassy_time::{Duration, Instant, Ticker};
 use embedded_alloc::LlffHeap as Heap;
 use embedded_graphics::{
-    image::{Image as EgImage, ImageRawBE},
-    pixelcolor::Rgb565,
+    pixelcolor::{Rgb565, raw::RawU16},
     prelude::*,
+    primitives::Rectangle,
 };
 use mousefood::prelude::*;
 use ratatui::{Terminal, layout::Rect};
@@ -59,13 +59,6 @@ unsafe fn SWI_IRQ_1() {
 }
 
 static mut FRAMEBUFFER: [u16; lcd::WIDTH * lcd::HEIGHT] = [0; lcd::WIDTH * lcd::HEIGHT];
-
-static AVATAR: &[u8] = include_bytes!("../assets/avatar.rgb565");
-static CONTACT_CODES: [&[u8]; 3] = [
-    include_bytes!("../assets/contact.rgb565"),
-    include_bytes!("../assets/github.rgb565"),
-    include_bytes!("../assets/linkedin.rgb565"),
-];
 
 /// What the flush callback needs from the latest frame.
 #[derive(Default)]
@@ -217,19 +210,17 @@ async fn main(_spawner: Spawner) {
         while let Ok(command) = usb::COMMANDS.try_receive() {
             match command {
                 usb::Command::Key(key) => app.key(key),
-                usb::Command::Mirror => {
-                    mirror = !mirror;
+                usb::Command::Mirror(on) => {
+                    mirror = on;
                     if !mirror {
                         text = String::new();
                     }
-                    terminal.clear().unwrap();
-                    usb::write(if mirror { "\x1b[2J" } else { "\x1b[0m\x1b[2J\x1b[Hmirror off\r\n" });
                 }
                 usb::Command::Screen => snapshot = true,
                 usb::Command::Bootsel => usb::reboot(0x0002),
                 usb::Command::Demo => app.start_demo(),
                 usb::Command::Help => {
-                    usb::write("commands: mirror | screen | demo | key up|down|left|right|select | bootsel\r\n");
+                    usb::write("commands: mirror [on|off] | screen | demo | key up|down|left|right|select | bootsel\r\n");
                 }
             }
         }
@@ -272,7 +263,7 @@ async fn main(_spawner: Spawner) {
         perf_frames += 1;
         frame_count = frame_count.wrapping_add(1);
         // Mirror every 3rd frame, skipping frames the host hasn't caught up with.
-        if mirror && frame_count % 3 == 0 {
+        if mirror && frame_count.is_multiple_of(3) {
             badge_ui::mirror::ansi(completed.buffer, &mut text);
             usb::write(&text);
         }
@@ -281,20 +272,16 @@ async fn main(_spawner: Spawner) {
             usb::write(&text);
         }
         for line in app.take_log() {
-            if !mirror {
-                usb::write(&format!("[{:>7}] {line}\r\n", Instant::now().as_millis()));
-            }
+            usb::write(&format!("[{:>7}] {line}\r\n", Instant::now().as_millis()));
         }
         leds.set(app.leds());
         if perf_since.elapsed() > Duration::from_secs(2) {
-            if !mirror {
-                let [r, b, fl] = perf.map(|v| v / perf_frames / 100);
-                let line = format!(
-                    "perf page {} render {}.{} backend {}.{} flush {}.{} ms heap {}K\r\n",
-                    app.page, r / 10, r % 10, b / 10, b % 10, fl / 10, fl % 10, HEAP.used() / 1024
-                );
-                usb::write(&line);
-            }
+            let [r, b, fl] = perf.map(|v| v / perf_frames / 100);
+            let line = format!(
+                "perf page {} render {}.{} backend {}.{} flush {}.{} ms heap {}K\r\n",
+                app.page, r / 10, r % 10, b / 10, b % 10, fl / 10, fl % 10, HEAP.used() / 1024
+            );
+            usb::write(&line);
             (perf, perf_frames, perf_since) = ([0; 3], 0, Instant::now());
         }
 
@@ -305,16 +292,8 @@ async fn main(_spawner: Spawner) {
 }
 
 fn draw_image(display: &mut lcd::Lcd, image: Image, rect: Rect) {
-    let (data, side) = match image {
-        Image::Avatar => (AVATAR, 88),
-        Image::Contact(i) => (CONTACT_CODES[i], 132),
-    };
-    let (cw, ch) = (CELL_PX.0 as i32, CELL_PX.1 as i32);
-    let (w, h) = (rect.width as i32 * cw, rect.height as i32 * ch);
-    let origin = Point::new(
-        rect.x as i32 * cw + (w - side) / 2,
-        rect.y as i32 * ch + (h - side) / 2,
-    );
-    let raw = ImageRawBE::<Rgb565>::new(data, side as u32);
-    EgImage::new(&raw, origin).draw(display).unwrap();
+    let (w, h) = (rect.width as u32 * CELL_PX.0 as u32, rect.height as u32 * CELL_PX.1 as u32);
+    let pixels = (0..w * h).map(|i| Rgb565::from(RawU16::new(image.slot_pixel(w, h, i % w, i / w))));
+    let origin = Point::new(rect.x as i32 * CELL_PX.0 as i32, rect.y as i32 * CELL_PX.1 as i32);
+    display.fill_contiguous(&Rectangle::new(origin, Size::new(w, h)), pixels).unwrap();
 }

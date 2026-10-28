@@ -3,6 +3,7 @@ name = "badge-ui"
 version = "0.1.0"
 edition = "2024"
 publish = false
+license = "MIT OR Apache-2.0"
 
 [dependencies]
 ratatui = { version = "0.30.2", default-features = false, features = ["layout-cache"] }
@@ -10,9 +11,12 @@ tachyonfx = { version = "0.25.2", default-features = false }
 tui-big-text = { version = "0.8.10", default-features = false }
 
 [build-dependencies]
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 qrcode = { version = "0.14.1", default-features = false }
+serde = { version = "1", features = ["derive"] }
+toml = "0.9"
 
 [dev-dependencies]
 critical-section = { version = "1.2", features = ["std"] }
-mousefood = { path = "../../mousefood/mousefood", default-features = false, features = ["fonts"] }
+mousefood = { version = "0.5.3", default-features = false, features = ["fonts"] }
 png = "0.17"

@@ -39,7 +39,7 @@ pub static REBOOT_TO_BOOTSEL: AtomicBool = AtomicBool::new(false);
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Command {
     Key(badge_ui::Key),
-    Mirror,
+    Mirror(bool),
     Screen,
     Bootsel,
     Demo,
@@ -141,7 +141,8 @@ fn parse(line: &str) -> Option<Command> {
     use badge_ui::Key;
     let mut words = line.split_whitespace();
     Some(match (words.next()?, words.next()) {
-        ("mirror", _) => Command::Mirror,
+        ("mirror", Some("off")) => Command::Mirror(false),
+        ("mirror", _) => Command::Mirror(true),
         ("screen", _) => Command::Screen,
         ("bootsel", _) => Command::Bootsel,
         ("demo", _) => Command::Demo,

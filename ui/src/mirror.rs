@@ -4,10 +4,16 @@ use core::fmt::Write;
 use alloc::string::String;
 use ratatui::{buffer::Buffer, buffer::CellDiffOption, style::Color};
 
-/// True-color ANSI: home the cursor, then every row, only emitting colors when they change.
+/// Starts a mirror frame; log lines can arrive between frames but never inside one.
+pub const FRAME_START: char = '\x02';
+/// Ends a mirror frame.
+pub const FRAME_END: char = '\x03';
+
+/// One true-color ANSI frame between [`FRAME_START`] and [`FRAME_END`], only emitting
+/// colors when they change.
 pub fn ansi(buf: &Buffer, out: &mut String) {
     out.clear();
-    out.push_str("\x1b[H");
+    out.push(FRAME_START);
     for y in 0..buf.area.height {
         let (mut fg, mut bg) = (None, None);
         for x in 0..buf.area.width {
@@ -24,6 +30,7 @@ pub fn ansi(buf: &Buffer, out: &mut String) {
         }
         out.push_str("\x1b[0m\r\n");
     }
+    out.push(FRAME_END);
 }
 
 /// Plain text, one line per row.

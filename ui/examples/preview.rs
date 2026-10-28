@@ -2,7 +2,8 @@
 //! `cargo run -p badge-ui --example preview --target aarch64-apple-darwin -- /tmp/badge-preview`
 use std::{convert::Infallible, fs::File, io::BufWriter, path::PathBuf};
 
-use badge_ui::{App, Key, Sensors};
+use badge_ui::{App, CELL_PX, Image, Key, Sensors};
+use ratatui::layout::Rect;
 use mousefood::{
     embedded_graphics::{pixelcolor::Rgb888, prelude::*},
     prelude::*,
@@ -31,6 +32,23 @@ impl DrawTarget for Screen {
         }
         Ok(())
     }
+}
+
+/// Draw the image slots the way the firmware does after Mousefood flushes.
+fn with_images(screen: &Screen, images: &[(Image, Rect)]) -> Screen {
+    let mut out = Screen(screen.0.clone());
+    for &(image, rect) in images {
+        let (cw, ch) = (CELL_PX.0 as usize, CELL_PX.1 as usize);
+        let (w, h) = (rect.width as usize * cw, rect.height as usize * ch);
+        for y in 0..h {
+            for x in 0..w {
+                let p = image.slot_pixel(w as u32, h as u32, x as u32, y as u32) as u32;
+                let rgb = Rgb888::new(((p >> 11) << 3) as u8, (((p >> 5) & 0x3F) << 2) as u8, ((p & 0x1F) << 3) as u8);
+                out.0[(rect.y as usize * ch + y) * W + rect.x as usize * cw + x] = rgb;
+            }
+        }
+    }
+    out
 }
 
 fn save(screen: &Screen, path: PathBuf) {
@@ -75,8 +93,7 @@ fn main() {
             app.update(33, s);
             terminal.draw(|f| app.draw(f)).unwrap();
         }
-        let screen = terminal.backend().display();
-        save(screen, dir.join(format!("{page}-{name}.png")));
+        save(&with_images(terminal.backend().display(), &app.images), dir.join(format!("{page}-{name}.png")));
         app.key(Key::Right);
     }
     for (page, name) in [(7, "billboard"), (8, "life")] {

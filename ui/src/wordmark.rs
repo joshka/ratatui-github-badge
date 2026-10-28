@@ -1,9 +1,36 @@
-//! The Ratatui pixel wordmark (assets/ratatui-wordmark.svg) drawn with half-block cells.
+//! The Ratatui pixel wordmark drawn with half-block cells.
 use ratatui::{buffer::Buffer, layout::Rect, style::Color, widgets::Widget};
 
-include!(concat!(env!("OUT_DIR"), "/wordmark.rs"));
+/// The wordmark as 36x5 pixels: `#` letters, `+` drop shadow, `.` empty.
+const ART: [&str; 5] = [
+    "###+...##+..###+..##+..###+.#+.#+.#+",
+    "#+.#+.#+.#+..#+..#+.#+..#+..#+.#+.#+",
+    "###+..####+..#+..####+..#+..#+.#+.#+",
+    "#+#+..#+.#+..#+..#+.#+..#+..#+.#+.#+",
+    "#+.#+.#+.#+..#+..#+.#+..#+...##+..#+",
+];
 
-/// The drop-shadow gray from the SVG.
+/// [`ART`] as 0 (empty), 1 (letters) and 2 (shadow).
+pub const WORDMARK: [[u8; 36]; 5] = {
+    let mut grid = [[0; 36]; 5];
+    let mut y = 0;
+    while y < 5 {
+        let row = ART[y].as_bytes();
+        let mut x = 0;
+        while x < 36 {
+            grid[y][x] = match row[x] {
+                b'#' => 1,
+                b'+' => 2,
+                _ => 0,
+            };
+            x += 1;
+        }
+        y += 1;
+    }
+    grid
+};
+
+/// The drop-shadow gray from the original wordmark.
 pub const SHADOW: Color = Color::Rgb(0x47, 0x47, 0x47);
 
 pub struct Wordmark {
