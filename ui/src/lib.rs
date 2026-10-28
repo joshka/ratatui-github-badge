@@ -87,11 +87,11 @@ const DEMO: [(usize, usize, u32); 11] = [
 /// With no input for this long, the badge drifts into ambient mode: just the scenes.
 const IDLE_MS: u32 = 30_000;
 const AMBIENT: [(usize, usize, u32); 5] = [
-    (PAGE_BILLBOARD, 0, 20000),
-    (PAGE_PLASMA, 0, 20000),
-    (PAGE_LIFE, 0, 25000),
-    (PAGE_RAIN, 0, 20000),
-    (PAGE_WARP, 0, 20000),
+    (PAGE_BILLBOARD, 0, 8000),
+    (PAGE_PLASMA, 0, 8000),
+    (PAGE_LIFE, 0, 10000),
+    (PAGE_RAIN, 0, 8000),
+    (PAGE_WARP, 0, 8000),
 ];
 
 const SUBTABS: [&str; 4] = ["stack", "bars", "gauges", "fx"];
