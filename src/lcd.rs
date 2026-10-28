@@ -110,7 +110,7 @@ impl Lcd {
         self.command(0x2B, &[0, 0, 0x01, 0x3f]); // RASET 0..319
         self.command(0x36, &[0x80 | 0x10]); // MADCTL: ROW_ORDER | SCAN_ORDER
         self.fb.fill(0);
-        self.flush();
+        self.flush(false);
         self.command(0x29, &[]); // DISPON
         self._bl.set_high();
     }
@@ -126,8 +126,8 @@ impl Lcd {
         self.cs.set_high();
     }
 
-    /// Send the whole framebuffer to the panel.
-    pub fn flush(&mut self) {
+    /// Send the whole framebuffer to the panel, rotated 180 degrees when `flipped`.
+    pub fn flush(&mut self, flipped: bool) {
         self.cs.set_low();
         self.dc.set_low();
         self.cs.set_high();
@@ -139,7 +139,8 @@ impl Lcd {
         self.dc.set_high();
         for x in 0..WIDTH {
             for y in 0..HEIGHT {
-                let px = self.fb[y * WIDTH + x];
+                let i = y * WIDTH + x;
+                let px = self.fb[if flipped { WIDTH * HEIGHT - 1 - i } else { i }];
                 write_byte((px >> 8) as u8);
                 write_byte(px as u8);
             }

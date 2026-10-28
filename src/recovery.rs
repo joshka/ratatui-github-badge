@@ -53,7 +53,7 @@ pub fn init() -> bool {
     } else if watchdog.reason().read().timer() {
         let mut report = Report::new();
         let _ = report.write_str(
-            "Watchdog recovered a stalled task. Wi-Fi remains off until explicitly started.",
+            "Watchdog reset: the main loop stalled for 5 s.",
         );
         Some(report)
     } else {
