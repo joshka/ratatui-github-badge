@@ -44,6 +44,9 @@ pub struct Lcd {
     _bl: Output<'static>,
     _power: Output<'static>,
     fb: &'static mut [u16; WIDTH * HEIGHT],
+    /// Inclusive (x0, y0, x1, y1) of pixels changed since the last flush.
+    dirty: Option<(usize, usize, usize, usize)>,
+    flipped: bool,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -72,6 +75,8 @@ impl Lcd {
             _bl: bl,
             _power: power,
             fb,
+            dirty: Some((0, 0, WIDTH - 1, HEIGHT - 1)),
+            flipped: false,
         };
         lcd.init();
         lcd
@@ -126,20 +131,43 @@ impl Lcd {
         self.cs.set_high();
     }
 
-    /// Send the whole framebuffer to the panel, rotated 180 degrees when `flipped`.
+    fn mark(&mut self, x0: usize, y0: usize, x1: usize, y1: usize) {
+        self.dirty = Some(match self.dirty {
+            None => (x0, y0, x1, y1),
+            Some((a, b, c, d)) => (a.min(x0), b.min(y0), c.max(x1), d.max(y1)),
+        });
+    }
+
+    /// Send the changed part of the framebuffer, rotated 180 degrees when `flipped`.
+    ///
+    /// The panel is 240x320 portrait: its row address is the landscape x and its column
+    /// address the landscape y, so a dirty rectangle maps straight onto RASET/CASET.
     pub fn flush(&mut self, flipped: bool) {
-        self.cs.set_low();
-        self.dc.set_low();
-        self.cs.set_high();
-        self.command(0x2A, &[0, 0, 0, 239]); // CASET
-        self.command(0x2B, &[0, 0, 0x01, 0x3f]); // RASET 0..319
+        if flipped != self.flipped {
+            self.flipped = flipped;
+            self.mark(0, 0, WIDTH - 1, HEIGHT - 1);
+        }
+        let Some((x0, y0, x1, y1)) = self.dirty.take() else { return };
+        // Panel addresses of the dirty rectangle; flipping mirrors both axes.
+        let (rx0, rx1, cy0, cy1) = if flipped {
+            (WIDTH - 1 - x1, WIDTH - 1 - x0, HEIGHT - 1 - y1, HEIGHT - 1 - y0)
+        } else {
+            (x0, x1, y0, y1)
+        };
+        let be = |v: usize| [(v >> 8) as u8, v as u8];
+        let [c0h, c0l] = be(cy0);
+        let [c1h, c1l] = be(cy1);
+        let [r0h, r0l] = be(rx0);
+        let [r1h, r1l] = be(rx1);
+        self.command(0x2A, &[c0h, c0l, c1h, c1l]); // CASET
+        self.command(0x2B, &[r0h, r0l, r1h, r1l]); // RASET
         self.cs.set_low();
         self.dc.set_low();
         write_byte(0x2C); // RAMWR
         self.dc.set_high();
-        for x in 0..WIDTH {
-            for y in 0..HEIGHT {
-                let i = y * WIDTH + x;
+        for rx in rx0..=rx1 {
+            for cy in cy0..=cy1 {
+                let i = cy * WIDTH + rx;
                 let px = self.fb[if flipped { WIDTH * HEIGHT - 1 - i } else { i }];
                 write_byte((px >> 8) as u8);
                 write_byte(px as u8);
@@ -177,7 +205,9 @@ impl DrawTarget for Lcd {
     {
         for Pixel(p, c) in pixels {
             if (0..WIDTH as i32).contains(&p.x) && (0..HEIGHT as i32).contains(&p.y) {
-                self.fb[p.y as usize * WIDTH + p.x as usize] = RawU16::from(c).into_inner();
+                let (x, y) = (p.x as usize, p.y as usize);
+                self.fb[y * WIDTH + x] = RawU16::from(c).into_inner();
+                self.mark(x, y, x, y);
             }
         }
         Ok(())
@@ -193,6 +223,7 @@ impl DrawTarget for Lcd {
             return Ok(());
         };
         let raw = RawU16::from(color).into_inner();
+        self.mark(area.top_left.x as usize, area.top_left.y as usize, br.x as usize, br.y as usize);
         for y in area.top_left.y..=br.y {
             let row = y as usize * WIDTH;
             self.fb[row + area.top_left.x as usize..=row + br.x as usize].fill(raw);
@@ -215,6 +246,11 @@ impl DrawTarget for Lcd {
         }
         let mut colors = colors.into_iter();
         let (x0, w) = (area.top_left.x as usize, area.size.width as usize);
+        if w == 0 || area.size.height == 0 {
+            return Ok(());
+        }
+        let y0 = area.top_left.y as usize;
+        self.mark(x0, y0, x0 + w - 1, y0 + area.size.height as usize - 1);
         for y in area.top_left.y as usize..area.top_left.y as usize + area.size.height as usize {
             for px in &mut self.fb[y * WIDTH + x0..y * WIDTH + x0 + w] {
                 match colors.next() {
@@ -228,6 +264,7 @@ impl DrawTarget for Lcd {
 
     fn clear(&mut self, color: Self::Color) -> Result<(), Self::Error> {
         self.fb.fill(RawU16::from(color).into_inner());
+        self.mark(0, 0, WIDTH - 1, HEIGHT - 1);
         Ok(())
     }
 }
