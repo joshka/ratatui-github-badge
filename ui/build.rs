@@ -1,6 +1,7 @@
 //! Turn the per-user `badge.toml` (or `badge.example.toml`) into Rust, and encode QR codes
 //! and the avatar on the host so the badge only has to draw them.
 use std::{
+    collections::BTreeMap,
     env,
     fmt::Write,
     fs,
@@ -23,9 +24,28 @@ struct Config {
     name: String,
     handle: String,
     role: String,
+    #[serde(default)]
+    ambient: Ambient,
     moods: Vec<String>,
     avatar: Option<PathBuf>,
     contacts: Vec<Contact>,
+}
+
+/// Ambient mode's scenes, in the order the UI expects their weights.
+const SCENES: [&str; 4] = ["fire", "plasma", "rain", "warp"];
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, default)]
+struct Ambient {
+    idle_seconds: u32,
+    scene_seconds: u32,
+    weights: BTreeMap<String, u32>,
+}
+
+impl Default for Ambient {
+    fn default() -> Self {
+        Self { idle_seconds: 30, scene_seconds: 8, weights: BTreeMap::new() }
+    }
 }
 
 #[derive(Deserialize)]
@@ -76,6 +96,16 @@ fn config(out_dir: &Path) -> String {
     writeln!(out, "pub const HANDLE: &str = {handle:?};").unwrap();
     writeln!(out, "pub const ROLE: &str = {role:?};").unwrap();
     writeln!(out, "pub const MOODS: &[&str] = &{moods:?};").unwrap();
+    let Ambient { idle_seconds, scene_seconds, weights } = &config.ambient;
+    for scene in weights.keys() {
+        assert!(SCENES.contains(&scene.as_str()), "{}: unknown ambient scene {scene:?}; expected one of {SCENES:?}", path.display());
+    }
+    // Rain by default shows up three times as often as each of the others.
+    let weights = SCENES.map(|s| weights.get(s).copied().unwrap_or(if s == "rain" { 3 } else { 1 }));
+    assert!(weights.iter().any(|w| *w > 0), "{}: every ambient weight is 0", path.display());
+    writeln!(out, "pub const AMBIENT_IDLE_MS: u32 = {};", idle_seconds * 1000).unwrap();
+    writeln!(out, "pub const AMBIENT_SCENE_MS: u32 = {};", scene_seconds.max(&1) * 1000).unwrap();
+    writeln!(out, "pub const AMBIENT_WEIGHTS: [u32; 4] = {weights:?};").unwrap();
     writeln!(out, "pub const CONTACTS: &[Contact] = &[").unwrap();
     for Contact { label, qr: text } in &config.contacts {
         let width = QrCode::with_error_correction_level(text, EcLevel::M).unwrap().width();

@@ -58,7 +58,7 @@ enum Command {
     Key { key: Key },
     /// Start the booth demo.
     Demo,
-    /// Start the idle scenes (the badge also does this after 30 s without input).
+    /// Start the idle scenes (the badge also does this when idle; see `[ambient]` in badge.toml).
     Ambient,
     /// Reboot into BOOTSEL for flashing (`cargo run --release` does this by itself).
     Bootsel,

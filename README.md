@@ -9,8 +9,9 @@ pixel on screen is a terminal cell, drawn by [Mousefood] onto the badge's LCD.
 - **Interaction:** the screen flips 180° when you lift the badge to read it, and parts of the
   UI drift with the tilt. Hold Select for a second to start a hands-free booth demo, which
   includes full-screen scenes: Doom fire, plasma, digital rain and a warp starfield. Left
-  alone for 30 seconds, it drifts into ambient mode, just those scenes with your name, until
-  you press a button.
+  alone for 30 seconds, it drifts into ambient mode: those scenes in a random order, each with
+  your name, until you press a button. Lift the badge to read it and it wakes on your contact
+  QR code. The timings and how often each scene comes up are set in `badge.toml`.
 - **USB:** the badge shows up as a serial port. `cargo badge` mirrors its screen in your
   terminal (as a Ratatui app, of course) and drives it with the arrow keys.
 

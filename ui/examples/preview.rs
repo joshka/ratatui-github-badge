@@ -96,7 +96,7 @@ fn main() {
         save(&with_images(terminal.backend().display(), &app.images), dir.join(format!("{page}-{name}.png")));
         app.key(Key::Right);
     }
-    for (page, name) in [(7, "billboard"), (8, "plasma"), (9, "rain"), (10, "warp")] {
+    for (page, name) in [(7, "fire"), (8, "plasma"), (9, "rain"), (10, "warp")] {
         app.goto_page(page);
         for _ in 0..70 {
             app.update(33, sensors);

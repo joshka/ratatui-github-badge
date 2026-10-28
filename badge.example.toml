@@ -32,3 +32,10 @@ END:VCARD\r
 [[contacts]]
 label = "ratatui.rs"
 qr = "https://ratatui.rs"
+
+# Ambient mode: after `idle_seconds` without input the badge cycles full-screen scenes in a
+# random order, `scene_seconds` each. Weights set how often each scene comes up; 0 hides it.
+[ambient]
+idle_seconds = 30
+scene_seconds = 8
+weights = { fire = 1, plasma = 1, rain = 3, warp = 1 }

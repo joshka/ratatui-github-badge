@@ -55,7 +55,7 @@ const PAGE_BILLBOARD: usize = 7;
 const PAGE_PLASMA: usize = 8;
 const PAGE_RAIN: usize = 9;
 const PAGE_WARP: usize = 10;
-const SCENE_NAMES: [&str; 4] = ["billboard", "plasma", "rain", "warp"];
+const SCENE_NAMES: [&str; 4] = ["fire", "plasma", "rain", "warp"];
 
 /// Fire pixels are half a cell; this fills the screen from under the wordmark to the banner.
 const FIRE_ROWS: usize = 34;
@@ -82,14 +82,8 @@ const DEMO: [(usize, usize, u32); 10] = [
     (PAGE_GET, 0, 6000),
     (PAGE_GET, 1, 6000),
 ];
-/// With no input for this long, the badge drifts into ambient mode: just the scenes.
-const IDLE_MS: u32 = 30_000;
-const AMBIENT: [(usize, usize, u32); 4] = [
-    (PAGE_BILLBOARD, 0, 8000),
-    (PAGE_PLASMA, 0, 8000),
-    (PAGE_RAIN, 0, 8000),
-    (PAGE_WARP, 0, 8000),
-];
+/// Ambient mode's scenes, in the order of `config::AMBIENT_WEIGHTS`.
+const AMBIENT_SCENES: [usize; 4] = [PAGE_BILLBOARD, PAGE_PLASMA, PAGE_RAIN, PAGE_WARP];
 
 const SUBTABS: [&str; 4] = ["stack", "bars", "gauges", "fx"];
 const STACK: [[&str; 3]; 7] = [
@@ -239,8 +233,8 @@ pub struct App {
     maze_last_ms: Option<u32>,
     maze_best_ms: Option<u32>,
     demo: bool,
-    /// The running script: `DEMO` (the booth tour) or `AMBIENT` (scenes only).
-    script: &'static [(usize, usize, u32)],
+    /// The demo is ambient mode (weighted random scenes) rather than the `DEMO` tour.
+    ambient: bool,
     idle_ms: u32,
     demo_step: usize,
     demo_step_ms: u32,
@@ -295,7 +289,7 @@ impl App {
             maze_last_ms: None,
             maze_best_ms: None,
             demo: false,
-            script: &DEMO,
+            ambient: false,
             idle_ms: 0,
             demo_step: 0,
             demo_step_ms: 0,
@@ -342,7 +336,7 @@ impl App {
 
     /// Whether the running demo is the idle scenes rather than the booth tour.
     pub fn ambient(&self) -> bool {
-        self.demo && core::ptr::eq(self.script, &AMBIENT[..])
+        self.demo && self.ambient
     }
 
     /// Events since the last call, for the USB log.
@@ -385,6 +379,11 @@ impl App {
 
     /// The first input during the demo only ends it.
     fn wake(&mut self) -> bool {
+        self.wake_to(PAGE_HERO)
+    }
+
+    /// Like `wake`, landing on `page`.
+    fn wake_to(&mut self, page: usize) -> bool {
         self.idle_ms = 0;
         if !self.demo {
             return false;
@@ -395,7 +394,7 @@ impl App {
         }
         self.demo = false;
         self.log.push("demo off".into());
-        self.goto(PAGE_HERO);
+        self.goto(page);
         true
     }
 
@@ -521,25 +520,53 @@ impl App {
         if self.demo && !self.ambient() {
             return;
         }
-        self.run_script(&DEMO, "demo on");
+        self.run(false, "demo on");
         self.demo_guard = true;
     }
 
-    /// Start the idle scenes (after `IDLE_MS` without input, or the USB `ambient` command).
+    /// Start the idle scenes (after `config::AMBIENT_IDLE_MS` without input, or the USB
+    /// `ambient` command).
     pub fn start_ambient(&mut self) {
         if !self.demo {
-            self.run_script(&AMBIENT, "ambient on");
+            self.run(true, "ambient on");
         }
     }
 
-    fn run_script(&mut self, script: &'static [(usize, usize, u32)], log: &str) {
+    fn run(&mut self, ambient: bool, log: &str) {
         self.demo = true;
-        self.script = script;
+        self.ambient = ambient;
         self.demo_started_ms = self.now_ms;
         self.log.push(log.into());
-        self.demo_step = script.len() - 1;
+        self.demo_step = DEMO.len() - 1;
         self.demo_step_ms = u32::MAX;
         self.flash_leds();
+    }
+
+    /// A weighted random scene, never the one already showing (unless it's the only one).
+    fn pick_scene(&mut self) -> usize {
+        let weights = config::AMBIENT_WEIGHTS.map(|w| w as usize);
+        let others: [usize; 4] = core::array::from_fn(|i| if AMBIENT_SCENES[i] == self.page { 0 } else { weights[i] });
+        let pool = if others.iter().sum::<usize>() > 0 { others } else { weights };
+        let mut roll = self.rng.next_u32() as usize % pool.iter().sum::<usize>();
+        for (scene, weight) in AMBIENT_SCENES.iter().zip(pool) {
+            if roll < weight {
+                return *scene;
+            }
+            roll -= weight;
+        }
+        AMBIENT_SCENES[0]
+    }
+
+    /// Cut to a scene with a random full-screen transition.
+    fn change_scene(&mut self, page: usize) {
+        self.goto(page);
+        let transition = match self.rng.next_u32() % 4 {
+            0 => fx::sequence(&[fx::dissolve((250, Interpolation::QuadIn)), fx::coalesce((600, Interpolation::QuadOut))]),
+            1 => fx::sweep_in(Motion::LeftToRight, 20, 6, BG, (900, Interpolation::QuadOut)),
+            2 => fx::slide_in(Motion::UpToDown, 12, 4, BG, (800, Interpolation::QuadOut)),
+            _ => fx::coalesce((900, Interpolation::QuadOut)),
+        };
+        self.fx.add_unique_effect(0, transition);
     }
 
     fn update_demo(&mut self, dt_ms: u32) {
@@ -557,7 +584,7 @@ impl App {
             // The maze is played by tilting, so it never counts as idle.
             let busy = self.sensors.buttons != 0 || self.page == PAGE_MAZE;
             self.idle_ms = if busy { 0 } else { self.idle_ms.saturating_add(dt_ms) };
-            if self.idle_ms >= IDLE_MS {
+            if self.idle_ms >= config::AMBIENT_IDLE_MS {
                 self.start_ambient();
             }
             return;
@@ -569,11 +596,20 @@ impl App {
             self.demo_guard = false;
         }
         self.demo_step_ms = self.demo_step_ms.saturating_add(dt_ms);
-        let (_, _, duration) = self.script[self.demo_step];
+        if self.ambient {
+            if self.demo_step_ms >= config::AMBIENT_SCENE_MS {
+                self.demo_step_ms = 0;
+                let page = self.pick_scene();
+                self.change_scene(page);
+                self.accent = (self.accent + 1) % ACCENTS.len();
+            }
+            return;
+        }
+        let (_, _, duration) = DEMO[self.demo_step];
         if self.demo_step_ms >= duration {
-            self.demo_step = (self.demo_step + 1) % self.script.len();
+            self.demo_step = (self.demo_step + 1) % DEMO.len();
             self.demo_step_ms = 0;
-            let (page, sub, _) = self.script[self.demo_step];
+            let (page, sub, _) = DEMO[self.demo_step];
             if page == PAGE_GET {
                 self.qr = sub;
             }
@@ -670,8 +706,9 @@ impl App {
             self.flip_since = None;
             self.log.push(format!("flipped {wants_flip}"));
             self.flash_leds();
+            // Lifting the badge to read it: someone wants your details.
             if wants_flip {
-                self.wake();
+                self.wake_to(PAGE_CONTACT);
             }
             self.clear = true;
             let effect = fx::sweep_in(Motion::UpToDown, 10, 0, BG, (400, Interpolation::QuadOut));

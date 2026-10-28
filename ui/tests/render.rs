@@ -134,14 +134,43 @@ fn ambient_starts_when_idle_shows_only_scenes_and_wakes() {
     }
     assert!(app.ambient());
     let mut seen = std::collections::BTreeSet::new();
-    for _ in 0..(110_000 / 50) {
+    // Random order, so give every scene plenty of chances.
+    for _ in 0..(300_000 / 50) {
         app.update(50, sensors());
         seen.insert(app.page);
         render(&mut app);
     }
     assert_eq!(seen.len(), 4, "ambient visited {seen:?}");
     assert!(seen.iter().all(|&p| p >= 7), "ambient showed a menu page: {seen:?}");
+    let mut changes = 0;
+    let mut last = app.page;
+    for _ in 0..(80_000 / 50) {
+        app.update(50, sensors());
+        if app.page != last {
+            changes += 1;
+            last = app.page;
+        }
+    }
+    assert!(changes >= 8, "scenes should change every few seconds and never repeat back to back");
     app.key(Key::Down);
     assert!(!app.demo());
     assert_eq!(app.page, 0);
+}
+
+#[test]
+fn lifting_the_badge_wakes_ambient_to_contact_details() {
+    let mut app = App::new();
+    app.start_ambient();
+    for _ in 0..20 {
+        app.update(100, sensors());
+    }
+    assert!(app.ambient());
+    let mut s = sensors();
+    s.accel = [0.0, -0.9, 0.3];
+    for _ in 0..5 {
+        app.update(100, s);
+    }
+    assert!(app.flipped());
+    assert!(!app.demo());
+    assert_eq!(app.page, 5, "should land on the contact page");
 }
