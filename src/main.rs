@@ -1,7 +1,8 @@
 //! Ratatui on the GitHub Universe 2026 badge (RP2350B, 320x240 ST7789).
 //!
 //! The UI lives in the hardware-free `badge-ui` crate; this file wires up the display,
-//! buttons and sensors. Hold Left + Select for a second to reboot into BOOTSEL.
+//! buttons and sensors. Hold Left + Select for a second to reboot into BOOTSEL,
+//! or RESET to sleep.
 
 #![no_std]
 #![no_main]
@@ -10,6 +11,7 @@ mod lcd;
 mod leds;
 mod recovery;
 mod sensors;
+mod sleep;
 mod usb;
 
 extern crate alloc;
@@ -85,14 +87,15 @@ async fn main(_spawner: Spawner) {
     // The default 500-entry layout cache outgrows the heap; our pages need a few dozen.
     ratatui::layout::Layout::init_cache(core::num::NonZeroUsize::new(64).unwrap());
     recovery::init();
-    let mut watchdog = embassy_rp::watchdog::Watchdog::new(p.WATCHDOG);
-    watchdog.start(Duration::from_secs(5));
-    interrupt::SWI_IRQ_1.set_priority(Priority::P2);
-    usb::start(USB_EXECUTOR.start(interrupt::SWI_IRQ_1), p.USB);
     let mut leds = leds::Leds::new(
         Pwm::new_output_ab(p.PWM_SLICE0, p.PIN_0, p.PIN_1, leds::Leds::config()),
         Pwm::new_output_ab(p.PWM_SLICE1, p.PIN_2, p.PIN_3, leds::Leds::config()),
     );
+    sleep::check(p.PIN_14, &mut leds);
+    let mut watchdog = embassy_rp::watchdog::Watchdog::new(p.WATCHDOG);
+    watchdog.start(Duration::from_secs(5));
+    interrupt::SWI_IRQ_1.set_priority(Priority::P2);
+    usb::start(USB_EXECUTOR.start(interrupt::SWI_IRQ_1), p.USB);
 
     let data = [
         Output::new(p.PIN_32, Level::Low),
