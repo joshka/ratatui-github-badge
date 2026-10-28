@@ -12,4 +12,10 @@ pub struct Wifi {
     pub password: Option<&'static str>,
 }
 
+/// The WebSocket relay that `cargo badge --relay` also connects to (see `relay/`).
+pub struct Relay {
+    pub url: &'static str,
+    pub token: &'static str,
+}
+
 include!(concat!(env!("OUT_DIR"), "/config.rs"));

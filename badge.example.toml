@@ -46,3 +46,20 @@ weights = { fire = 1, plasma = 1, rain = 3, warp = 1 }
 [[wifi]]
 ssid = "GitHub Events"
 password = "HelloWorld"
+
+# Bluetooth LE: the badge advertises a Nordic UART Service, so `cargo badge --ble` (or a phone
+# app such as nRF Connect) can mirror and drive it. On by default.
+# `name` (at most 29 bytes) is what `cargo badge --ble` looks for. With a `key`, the badge and
+# the host prove to each other that they both know it before the badge takes commands or sends
+# anything; without one, anyone nearby can drive the badge. Make one with `openssl rand -hex 32`.
+# [ble]
+# enabled = true
+# name = "Ratatui badge"
+# key = "a long random string"
+
+# Optional relay for mirroring over the internet (see relay/README.md). The badge joins one of
+# the [[wifi]] networks and connects out to `url`; `cargo badge --relay` connects to the same
+# url. Each path is its own room. `token` must match the relay's RELAY_TOKEN secret.
+# [relay]
+# url = "wss://badge-relay.example.workers.dev/badge/ferris"
+# token = "a long random string"

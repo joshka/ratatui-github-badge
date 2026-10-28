@@ -31,6 +31,9 @@ struct Config {
     contacts: Vec<Contact>,
     #[serde(default = "conference_wifi")]
     wifi: Vec<Wifi>,
+    #[serde(default)]
+    ble: Ble,
+    relay: Option<Relay>,
 }
 
 #[derive(Deserialize)]
@@ -60,6 +63,27 @@ impl Default for Ambient {
     fn default() -> Self {
         Self { idle_seconds: 30, scene_seconds: 8, weights: BTreeMap::new() }
     }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, default)]
+struct Ble {
+    enabled: bool,
+    name: String,
+    key: Option<String>,
+}
+
+impl Default for Ble {
+    fn default() -> Self {
+        Self { enabled: true, name: "Ratatui badge".into(), key: None }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Relay {
+    url: String,
+    token: String,
 }
 
 #[derive(Deserialize)]
@@ -134,6 +158,27 @@ fn config(out_dir: &Path) -> String {
         writeln!(out, "    Wifi {{ ssid: {ssid:?}, password: {password:?} }},").unwrap();
     }
     writeln!(out, "];").unwrap();
+    let ble = &config.ble;
+    // The name goes in a 31-byte scan response, after a 2-byte header.
+    assert!(ble.name.len() <= 29, "{}: ble.name must be at most 29 bytes", path.display());
+    if ble.enabled && ble.key.is_none() {
+        println!("cargo:warning=no ble.key in {}: anyone nearby can drive the badge over Bluetooth", path.display());
+    }
+    let ble_name = ble.enabled.then_some(&ble.name);
+    writeln!(out, "pub const BLE_NAME: Option<&str> = {ble_name:?};").unwrap();
+    writeln!(out, "pub const BLE_KEY: Option<&str> = {:?};", ble.key).unwrap();
+    match &config.relay {
+        Some(Relay { url, token }) => {
+            assert!(
+                url.starts_with("wss://") || url.starts_with("ws://"),
+                "{}: relay.url must start with wss:// or ws://",
+                path.display()
+            );
+            assert!(!config.wifi.is_empty(), "{}: the relay needs at least one [[wifi]] network", path.display());
+            writeln!(out, "pub const RELAY: Option<Relay> = Some(Relay {{ url: {url:?}, token: {token:?} }});").unwrap();
+        }
+        None => writeln!(out, "pub const RELAY: Option<Relay> = None;").unwrap(),
+    }
     writeln!(out, "pub const AVATAR_SIDE: u32 = {AVATAR_SIDE};").unwrap();
     match &config.avatar {
         Some(avatar) => {

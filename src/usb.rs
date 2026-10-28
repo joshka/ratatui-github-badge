@@ -6,11 +6,6 @@ use embassy_rp::{
     peripherals::USB,
     usb::{Driver, InterruptHandler},
 };
-use embassy_sync::{
-    blocking_mutex::raw::CriticalSectionRawMutex,
-    channel::Channel,
-    pipe::Pipe,
-};
 use embassy_usb::{
     Builder, Handler,
     class::cdc_acm::{CdcAcmClass, Receiver, Sender, State},
@@ -28,32 +23,9 @@ bind_interrupts!(struct Irqs {
 
 type UsbDriver = Driver<'static, USB>;
 
-/// Bytes for the host. Writers drop output when it is full (e.g. nobody listening).
-static TX: Pipe<CriticalSectionRawMutex, 32768> = Pipe::new();
-/// Commands from the host.
-pub static COMMANDS: Channel<CriticalSectionRawMutex, Command, 8> = Channel::new();
 /// Set by picotool's reset request; the main loop reboots (it owns the watchdog, which would
 /// otherwise cancel a delayed ROM reboot).
 pub static REBOOT_TO_BOOTSEL: AtomicBool = AtomicBool::new(false);
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Command {
-    Key(badge_ui::Key),
-    Mirror(bool),
-    Screen,
-    Bootsel,
-    Demo,
-    Ambient,
-    Help,
-}
-
-/// Queue text for the host without blocking; returns false if it didn't fit.
-pub fn write(text: &str) -> bool {
-    if TX.free_capacity() < text.len() {
-        return false;
-    }
-    TX.try_write(text.as_bytes()).is_ok()
-}
 
 /// Runs on a high-priority interrupt executor so enumeration and transfers stay responsive
 /// while the main loop is busy drawing (a frame blocks for tens of milliseconds).
@@ -113,7 +85,7 @@ async fn transmit(mut sender: Sender<'static, UsbDriver>) {
     loop {
         sender.wait_connection().await;
         loop {
-            let n = TX.read(&mut buf).await;
+            let n = crate::link::USB.read(&mut buf).await;
             if sender.write_packet(&buf[..n]).await.is_err() {
                 break;
             }
@@ -123,38 +95,17 @@ async fn transmit(mut sender: Sender<'static, UsbDriver>) {
 
 async fn receive(mut receiver: Receiver<'static, UsbDriver>) {
     let mut packet = [0u8; 64];
-    let mut line = heapless_line::Line::new();
+    let mut line = crate::link::LineBuffer::new();
     loop {
         receiver.wait_connection().await;
         while let Ok(n) = receiver.read_packet(&mut packet).await {
             for &b in &packet[..n] {
-                if let Some(text) = line.push(b)
-                    && let Some(command) = parse(text)
-                {
-                    let _ = COMMANDS.try_send(command);
+                if let Some(text) = line.push(b) {
+                    crate::link::USB.command(text).await;
                 }
             }
         }
     }
-}
-
-fn parse(line: &str) -> Option<Command> {
-    use badge_ui::Key;
-    let mut words = line.split_whitespace();
-    Some(match (words.next()?, words.next()) {
-        ("mirror", Some("off")) => Command::Mirror(false),
-        ("mirror", _) => Command::Mirror(true),
-        ("screen", _) => Command::Screen,
-        ("bootsel", _) => Command::Bootsel,
-        ("demo", _) => Command::Demo,
-        ("ambient", _) => Command::Ambient,
-        ("key", Some("up")) => Command::Key(Key::Up),
-        ("key", Some("down")) => Command::Key(Key::Down),
-        ("key", Some("left")) => Command::Key(Key::Left),
-        ("key", Some("right")) => Command::Key(Key::Right),
-        ("key", Some("select")) => Command::Key(Key::Select),
-        _ => Command::Help,
-    })
 }
 
 /// Reboot into BOOTSEL (or back to the app) when picotool asks, as the Pico SDK does.
@@ -189,38 +140,4 @@ pub fn reboot(kind: u32) {
 
 pub fn reboot_requested() -> bool {
     REBOOT_TO_BOOTSEL.load(Ordering::Relaxed)
-}
-
-mod heapless_line {
-    /// Accumulates bytes into newline-terminated lines without allocating.
-    pub struct Line {
-        buf: [u8; 64],
-        len: usize,
-        ready: bool,
-    }
-
-    impl Line {
-        pub const fn new() -> Self {
-            Self { buf: [0; 64], len: 0, ready: false }
-        }
-
-        pub fn push(&mut self, b: u8) -> Option<&str> {
-            if self.ready {
-                self.len = 0;
-                self.ready = false;
-            }
-            match b {
-                b'\r' | b'\n' => {
-                    self.ready = true;
-                    core::str::from_utf8(&self.buf[..self.len]).ok().filter(|s| !s.is_empty())
-                }
-                _ if self.len < self.buf.len() => {
-                    self.buf[self.len] = b;
-                    self.len += 1;
-                    None
-                }
-                _ => None,
-            }
-        }
-    }
 }

@@ -7,7 +7,7 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 embassy-executor = "0.10.0"
-embassy-rp = { version = "0.10.0", features = ["rp235xb", "unstable-pac", "time-driver", "critical-section-impl", "binary-info", "executor-thread", "executor-interrupt"] }
+embassy-rp = { version = "0.10.0", features = ["rp235xb", "unstable-pac", "time-driver", "critical-section-impl", "binary-info", "imagedef-none", "executor-thread", "executor-interrupt"] }
 embassy-time = "0.5.1"
 cortex-m = { version = "0.7.10", features = ["inline-asm"] }
 cortex-m-rt = "0.7.7"
@@ -22,6 +22,20 @@ embassy-usb = "0.6.0"
 embassy-sync = "0.8.0"
 embassy-futures = "0.1.2"
 static_cell = "2.1.1"
+heapless = "0.9"
+
+# Radio: Bluetooth LE and Wi-Fi on the CYW43439 (an RM2 module on this board).
+cyw43 = { version = "0.7", features = ["bluetooth"] }
+cyw43-pio = "0.10"
+cyw43-firmware = { version = "0.1", features = ["wifi", "bluetooth"] }
+trouble-host = { version = "0.6", default-features = false, features = ["peripheral", "gatt", "derive", "default-packet-pool"] }
+embassy-net = { version = "0.9", features = ["tcp", "dns", "dhcpv4", "proto-ipv4", "medium-ethernet"] }
+embedded-tls = { version = "0.19", default-features = false }
+embedded-io-async = "0.7"
+rand_core = { version = "0.6", default-features = false }
+embassy-sync-07 = { version = "0.7", package = "embassy-sync" }
+hmac = "0.12"
+sha2 = { version = "0.10", default-features = false }
 
 [profile.release]
 opt-level = 3
@@ -35,4 +49,9 @@ opt-level = "s"
 
 [workspace]
 members = ["ui"]
-exclude = ["host"]
+exclude = ["host", "vendor"]
+
+# cyw43-pio 0.10.0 with embassy's fix for single-bit corruption on RP2350 reads
+# (https://github.com/embassy-rs/embassy/pull/6001), until a release includes it.
+[patch.crates-io]
+cyw43-pio = { path = "vendor/cyw43-pio" }

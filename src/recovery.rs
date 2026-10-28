@@ -75,17 +75,30 @@ pub fn report() -> Option<Report> {
     critical_section::with(|cs| *LAST_REPORT.borrow(cs).borrow())
 }
 
+/// A fault on either core (core 1 runs the radio) gets reported and reset like a panic, so the
+/// next boot starts in safe mode instead of carrying on with a dead core.
+#[cortex_m_rt::exception]
+unsafe fn HardFault(frame: &cortex_m_rt::ExceptionFrame) -> ! {
+    let core = embassy_rp::pac::SIO.cpuid().read();
+    reset_with(format_args!("HardFault on core {core} at pc {:#010x}", frame.pc()))
+}
+
 #[panic_handler]
 fn panic(info: &PanicInfo<'_>) -> ! {
+    match info.location() {
+        // Keep the useful filename and line rather than a long registry/home path.
+        Some(location) => {
+            let file = location.file().rsplit('/').next().unwrap_or("unknown");
+            reset_with(format_args!("{file}:{}: {}", location.line(), info.message()))
+        }
+        None => reset_with(format_args!("{}", info.message())),
+    }
+}
+
+fn reset_with(message: fmt::Arguments) -> ! {
     cortex_m::interrupt::disable();
     let mut report = Report::new();
-    if let Some(location) = info.location() {
-        // Keep the useful filename and line rather than a long registry/home path.
-        let file = location.file().rsplit('/').next().unwrap_or("unknown");
-        let _ = write!(report, "{file}:{}: {}", location.line(), info.message());
-    } else {
-        let _ = write!(report, "{}", info.message());
-    }
+    let _ = report.write_fmt(message);
     // .uninit is retained by cortex-m-rt during warm reset; publish only after writing.
     unsafe {
         core::ptr::write_volatile((&raw mut PANIC_REPORT).cast::<Report>(), report);

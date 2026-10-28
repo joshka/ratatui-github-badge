@@ -1,4 +1,5 @@
-//! Talk to the Ratatui Universe badge over its USB serial port.
+//! Talk to the Ratatui Universe badge over USB serial, Bluetooth LE (`--ble`) or the Wi-Fi
+//! relay (`--relay`).
 //!
 //! `cargo badge` opens a live mirror of the badge screen with its log; the arrow keys and
 //! Enter drive the badge. The other subcommands are one-shot.
@@ -7,14 +8,15 @@ use std::{
     io::{Read, Write},
     sync::mpsc::{self, Receiver},
     thread,
-    time::Duration,
+    path::PathBuf,
+    time::{Duration, Instant},
 };
 
 use ansi_to_tui::IntoText;
 use clap::{Parser, Subcommand, ValueEnum};
 use color_eyre::{
     Result,
-    eyre::{OptionExt, bail},
+    eyre::{OptionExt, WrapErr, bail},
 };
 use ratatui::{
     DefaultTerminal, Frame,
@@ -24,11 +26,12 @@ use ratatui::{
     text::{Line, Span, Text},
     widgets::{Block, Paragraph},
 };
-use serialport::{SerialPort, SerialPortType};
 
-/// The badge firmware uses the Pico SDK's USB IDs so `picotool -f` can find it.
-const VID: u16 = 0x2E8A;
-const PID: u16 = 0x0009;
+use link::Link;
+
+mod flash;
+mod link;
+
 /// Mirror frames are wrapped in these, so log lines can't tear a frame (see ui/src/mirror.rs).
 const FRAME_START: u8 = 0x02;
 const FRAME_END: u8 = 0x03;
@@ -40,8 +43,14 @@ const LOG_LINES: usize = 500;
 #[command(about)]
 struct Cli {
     /// Serial port; by default the first one with the badge's USB IDs.
-    #[arg(long, global = true)]
+    #[arg(long, global = true, conflicts_with_all = ["ble", "relay"])]
     port: Option<String>,
+    /// Connect over Bluetooth LE instead of USB.
+    #[arg(long, global = true, conflicts_with = "relay")]
+    ble: bool,
+    /// Connect through the relay in badge.toml's [relay] section instead of USB.
+    #[arg(long, global = true)]
+    relay: bool,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -62,6 +71,15 @@ enum Command {
     Ambient,
     /// Reboot into BOOTSEL for flashing (`cargo run --release` does this by itself).
     Bootsel,
+    /// Update the firmware over the open link (USB, --ble or --relay), sending only the
+    /// sectors that changed. Needs the A/B partition table (see README).
+    /// Send one raw protocol line and print what comes back for half a second.
+    Send { line: String },
+    Flash {
+        /// The firmware ELF.
+        #[arg(default_value = "target/thumbv8m.main-none-eabihf/release/ratatui-badge")]
+        elf: PathBuf,
+    },
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -88,7 +106,15 @@ impl Key {
 fn main() -> Result<()> {
     color_eyre::install()?;
     let cli = Cli::parse();
-    let port = open(cli.port)?;
+    let port = if cli.ble {
+        let (name, key) = ble_config();
+        link::ble(&name, key)?
+    } else if cli.relay {
+        let (url, token) = relay_config()?;
+        link::relay(&url, &token)?
+    } else {
+        link::serial(cli.port)?
+    };
     match cli.command.unwrap_or(Command::Mirror) {
         Command::Mirror => {
             let terminal = ratatui::init();
@@ -102,38 +128,58 @@ fn main() -> Result<()> {
         Command::Demo => one_shot(port, "demo"),
         Command::Ambient => one_shot(port, "ambient"),
         Command::Bootsel => one_shot(port, "bootsel"),
+        Command::Flash { .. } if cli.ble || cli.relay => bail!("updates only work over USB"),
+        Command::Flash { elf } => flash::flash(port, &elf),
+        Command::Send { line } => one_shot(port, &line),
     }
 }
 
-fn open(port: Option<String>) -> Result<Box<dyn SerialPort>> {
-    let name = match port {
-        Some(name) => name,
-        None => serialport::available_ports()?
-            .into_iter()
-            .find(|p| matches!(&p.port_type, SerialPortType::UsbPort(usb) if usb.vid == VID && usb.pid == PID))
-            // macOS lists each port as tty.* and cu.*; cu.* doesn't wait for carrier detect.
-            .map(|p| p.port_name.replace("/dev/tty.", "/dev/cu."))
-            .ok_or_eyre("badge not found: is it plugged in and running the Ratatui firmware?")?,
-    };
-    let mut port = serialport::new(&name, 115_200).timeout(Duration::from_millis(50)).open()?;
-    // The badge only talks once the host raises DTR, as terminal programs do.
-    port.write_data_terminal_ready(true)?;
-    Ok(port)
+/// The badge's settings, from the same file the firmware build reads.
+fn config() -> Result<toml::Table> {
+    let path = std::env::var_os("BADGE_CONFIG").map_or_else(|| PathBuf::from("badge.toml"), PathBuf::from);
+    let text = std::fs::read_to_string(&path).wrap_err_with(|| format!("reading {}", path.display()))?;
+    toml::from_str(&text).wrap_err_with(|| format!("parsing {}", path.display()))
 }
 
-fn send(port: &mut dyn SerialPort, line: &str) -> Result<()> {
-    port.write_all(format!("{line}\n").as_bytes())?;
+/// The name to look for and the key to prove, as the firmware was built with.
+fn ble_config() -> (String, Option<String>) {
+    let config = config().unwrap_or_default();
+    let field = |key| config.get("ble").and_then(|ble| ble.get(key)).and_then(|v| v.as_str()).map(str::to_string);
+    (field("name").unwrap_or_else(|| "Ratatui badge".to_string()), field("key"))
+}
+
+fn relay_config() -> Result<(String, String)> {
+    let config = config()?;
+    let relay = config.get("relay").ok_or_eyre("badge.toml has no [relay] section")?;
+    let field = |key| relay.get(key).and_then(|v| v.as_str()).map(str::to_string);
+    Ok((field("url").ok_or_eyre("relay.url missing")?, field("token").ok_or_eyre("relay.token missing")?))
+}
+
+/// Write one line. The serial port times out writes after 50 ms, which is normal while the badge
+/// is busy (erasing flash during an update), so keep going until a longer deadline.
+fn send(port: &mut dyn Write, line: &str) -> Result<()> {
+    let bytes = format!("{line}\n").into_bytes();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut written = 0;
+    while written < bytes.len() {
+        match port.write(&bytes[written..]) {
+            Ok(n) => written += n,
+            Err(e) if e.kind() == std::io::ErrorKind::TimedOut && Instant::now() < deadline => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
     Ok(())
 }
 
-fn one_shot(mut port: Box<dyn SerialPort>, line: &str) -> Result<()> {
-    send(port.as_mut(), line)?;
+fn one_shot(mut port: Link, line: &str) -> Result<()> {
+    send(port.writer.as_mut(), line)?;
     follow(port, Some(Duration::from_millis(500)))
 }
 
 /// Copy log output to stdout, skipping any mirror frames.
-fn follow(port: Box<dyn SerialPort>, duration: Option<Duration>) -> Result<()> {
-    let events = reader(port);
+fn follow(port: Link, duration: Option<Duration>) -> Result<()> {
+    let _writer = port.writer;
+    let events = reader(port.reader);
     let mut stdout = std::io::stdout();
     let deadline = duration.map(|d| std::time::Instant::now() + d);
     loop {
@@ -154,8 +200,8 @@ enum Incoming {
     Closed(String),
 }
 
-/// Split the serial stream into log lines and mirror frames on a background thread.
-fn reader(mut port: Box<dyn SerialPort>) -> Receiver<Incoming> {
+/// Split the stream into log lines and mirror frames on a background thread.
+fn reader(mut port: Box<dyn Read + Send>) -> Receiver<Incoming> {
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
         let (mut line, mut frame, mut in_frame) = (Vec::new(), Vec::new(), false);
@@ -205,7 +251,10 @@ fn reader(mut port: Box<dyn SerialPort>) -> Receiver<Incoming> {
 }
 
 struct Mirror {
-    port: Box<dyn SerialPort>,
+    port: Box<dyn Write + Send>,
+    name: String,
+    last_frame: Instant,
+    last_request: Instant,
     events: Receiver<Incoming>,
     screen: Text<'static>,
     log: VecDeque<String>,
@@ -215,11 +264,13 @@ struct Mirror {
 }
 
 impl Mirror {
-    fn new(port: Box<dyn SerialPort>) -> Result<Self> {
-        let events = reader(port.try_clone()?);
+    fn new(link: Link) -> Result<Self> {
         Ok(Self {
-            port,
-            events,
+            port: link.writer,
+            name: link.name,
+            last_frame: Instant::now(),
+            last_request: Instant::now(),
+            events: reader(link.reader),
             screen: Text::from("waiting for the first frame…"),
             log: VecDeque::new(),
             perf: String::new(),
@@ -242,6 +293,7 @@ impl Mirror {
                     Incoming::Frame(bytes) => {
                         self.screen = bytes.into_text()?;
                         self.frames += 1;
+                        self.last_frame = Instant::now();
                     }
                     Incoming::Line(line) if line.starts_with("perf ") => self.perf = line,
                     Incoming::Line(line) if line.is_empty() => {}
@@ -253,6 +305,11 @@ impl Mirror {
                     }
                     Incoming::Closed(error) => bail!("badge disconnected: {error}"),
                 }
+            }
+            // The badge forgets the request when a BLE or relay link drops and reconnects.
+            if self.last_frame.elapsed() > Duration::from_secs(2) && self.last_request.elapsed() > Duration::from_secs(3) {
+                send(self.port.as_mut(), "mirror on")?;
+                self.last_request = Instant::now();
             }
             terminal.draw(|f| self.draw(f))?;
             if !event::poll(Duration::from_millis(16))? {
@@ -287,7 +344,10 @@ impl Mirror {
             Layout::vertical([Constraint::Length(SCREEN.1 + 2), Constraint::Fill(1)]).areas(main)
         };
         let badge = Rect { height: badge.height.min(SCREEN.1 + 2), ..badge };
-        let title = Line::from(vec![" badge ".bold(), Span::raw(format!("{} frames ", self.frames)).dark_gray()]);
+        let title = Line::from(vec![
+            " badge ".bold(),
+            Span::raw(format!("{} · {} frames ", self.name, self.frames)).dark_gray(),
+        ]);
         f.render_widget(Paragraph::new(self.screen.clone()).block(Block::bordered().title(title)), badge);
 
         let block = Block::bordered().title(" log ".bold()).title_bottom(Line::from(self.perf.as_str()).dark_gray());

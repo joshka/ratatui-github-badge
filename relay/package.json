@@ -1,0 +1,15 @@
+{
+  "name": "badge-relay",
+  "private": true,
+  "license": "MIT OR Apache-2.0",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "check": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261028.1",
+    "typescript": "^7.0.2",
+    "wrangler": "^4.154.0"
+  }
+}

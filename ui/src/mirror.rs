@@ -9,12 +9,21 @@ pub const FRAME_START: char = '\x02';
 /// Ends a mirror frame.
 pub const FRAME_END: char = '\x03';
 
+/// A worst-case row: every cell changes both colors (about 19 bytes each) plus its symbol.
+const MAX_ROW: usize = 2 * 1024 + 512;
+
 /// One true-color ANSI frame between [`FRAME_START`] and [`FRAME_END`], only emitting
-/// colors when they change.
-pub fn ansi(buf: &Buffer, out: &mut String) {
+/// colors when they change. Busy pages can need tens of KB, so give up (returning false, with
+/// `out` empty) rather than grow `out` past `max` bytes: on the badge, a doubling `String` can
+/// ask for a block bigger than the heap has free.
+pub fn ansi(buf: &Buffer, out: &mut String, max: usize) -> bool {
     out.clear();
     out.push(FRAME_START);
     for y in 0..buf.area.height {
+        if out.len() + MAX_ROW > max {
+            out.clear();
+            return false;
+        }
         let (mut fg, mut bg) = (None, None);
         for x in 0..buf.area.width {
             let cell = &buf[(x, y)];
@@ -31,6 +40,7 @@ pub fn ansi(buf: &Buffer, out: &mut String) {
         out.push_str("\x1b[0m\r\n");
     }
     out.push(FRAME_END);
+    true
 }
 
 /// Plain text, one line per row.

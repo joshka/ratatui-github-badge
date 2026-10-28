@@ -1,14 +1,17 @@
 //! Ratatui on the GitHub Universe 2026 badge (RP2350B, 320x240 ST7789).
 //!
 //! The UI lives in the hardware-free `badge-ui` crate; this file wires up the display,
-//! buttons and sensors. Hold Left + Select for a second to reboot into BOOTSEL,
-//! or RESET to sleep.
+//! buttons, sensors and host links (USB, Bluetooth LE, the Wi-Fi relay). Hold Left + Select for
+//! a second to reboot into BOOTSEL, or RESET to sleep.
 
 #![no_std]
 #![no_main]
 
 mod lcd;
 mod leds;
+mod link;
+mod ota;
+mod radio;
 mod recovery;
 mod sensors;
 mod sleep;
@@ -50,6 +53,34 @@ pub static PICOTOOL_ENTRIES: [embassy_rp::binary_info::EntryAddr; 3] = [
     embassy_rp::binary_info::rp_cargo_version!(),
 ];
 
+/// A secure Arm executable, flagged "try before you buy": after an update the ROM boots it on
+/// trial, and `ota.rs` confirms it once it has run for a while (embassy's default lacks the
+/// flag). The version, from build.rs, makes the ROM prefer the newest image of the two.
+#[unsafe(link_section = ".start_block")]
+#[used]
+pub static IMAGE_DEF: embassy_rp::block::Block<3> = {
+    use embassy_rp::block::*;
+    const fn parse(s: &str) -> u32 {
+        let (bytes, mut i, mut n) = (s.as_bytes(), 0, 0);
+        while i < bytes.len() {
+            n = n * 10 + (bytes[i] - b'0') as u32;
+            i += 1;
+        }
+        n
+    }
+    let major = parse(env!("BADGE_VERSION_MAJOR"));
+    let minor = parse(env!("BADGE_VERSION_MINOR"));
+    Block::new([
+        item_image_type_exe(Security::Secure, Architecture::Arm) | (IMAGE_TYPE_TBYB as u32) << 16,
+        item_generic_2bs(0, 2, ITEM_1BS_VERSION),
+        major << 16 | minor,
+    ])
+};
+
+/// The largest mirror frame to build. Its buffer stays allocated while mirroring, so it is kept
+/// well under the USB outbox's 32 KB: the busiest pages skip frames rather than starve the heap.
+const MIRROR_MAX: usize = 24 * 1024;
+
 #[global_allocator]
 static HEAP: Heap = Heap::empty();
 
@@ -75,6 +106,8 @@ struct FlushState {
 )]
 async fn main(_spawner: Spawner) {
     {
+        // Pages use around 100 KB, but switching pages needs 15 KB blocks (a 53x24 cell buffer);
+        // at 168 KB the heap fragmented badly enough to fail one.
         const HEAP_SIZE: usize = 184 * 1024;
         static mut HEAP_MEM: [MaybeUninit<u8>; HEAP_SIZE] = [MaybeUninit::uninit(); HEAP_SIZE];
         unsafe { HEAP.init(&raw mut HEAP_MEM as usize, HEAP_SIZE) }
@@ -86,12 +119,15 @@ async fn main(_spawner: Spawner) {
     let p = embassy_rp::init(config);
     // The default 500-entry layout cache outgrows the heap; our pages need a few dozen.
     ratatui::layout::Layout::init_cache(core::num::NonZeroUsize::new(64).unwrap());
-    recovery::init();
+    // Safe mode: after a stall or panic, skip optional subsystems for one boot, so a crash in
+    // one of them can't become a reset loop that needs BOOT + RESET to flash a fix.
+    let safe_mode = recovery::init();
     let mut leds = leds::Leds::new(
         Pwm::new_output_ab(p.PWM_SLICE0, p.PIN_0, p.PIN_1, leds::Leds::config()),
         Pwm::new_output_ab(p.PWM_SLICE1, p.PIN_2, p.PIN_3, leds::Leds::config()),
     );
     sleep::check(p.PIN_14, &mut leds);
+    let mut ota = ota::Ota::new(p.FLASH);
     let mut watchdog = embassy_rp::watchdog::Watchdog::new(p.WATCHDOG);
     watchdog.start(Duration::from_secs(5));
     interrupt::SWI_IRQ_1.set_priority(Priority::P2);
@@ -119,6 +155,21 @@ async fn main(_spawner: Spawner) {
         Output::new(p.PIN_26, Level::Low), // backlight
         Output::new(p.PIN_41, Level::Low), // POWER_EN
         unsafe { &mut *framebuffer },
+    );
+    // After the display, which drives POWER_EN: the radio sits on that switched rail too.
+    radio::start(
+        p.CORE1,
+        safe_mode,
+        radio::Pins {
+            pio: p.PIO0,
+            dma_tx: p.DMA_CH0,
+            dma_rx: p.DMA_CH1,
+            trng: p.TRNG,
+            power: p.PIN_23,
+            data: p.PIN_24,
+            cs: p.PIN_25,
+            clock: p.PIN_29,
+        },
     );
 
     let mut sensors = sensors::Sensors::new(
@@ -168,12 +219,14 @@ async fn main(_spawner: Spawner) {
         app.show_debug();
     }
     let mut previous = 0u8;
+    // Say what booted once a host has had a few seconds to connect.
+    let boot = Instant::now();
+    let mut ota_announce = true;
     let mut combo_since: Option<Instant> = None;
     let mut last = Instant::now();
     let mut frame_ms = 0u32;
     // Most pages now draw in ~20 ms; cap at ~60 fps and let slower pages run back to back.
     let mut ticker = Ticker::every(Duration::from_millis(16));
-    let mut mirror = false;
     let mut snapshot = false;
     let mut frame_count = 0u32;
     // Only grows when mirroring or taking a snapshot.
@@ -210,23 +263,27 @@ async fn main(_spawner: Spawner) {
         if usb::reboot_requested() {
             usb::reboot(0x0002);
         }
-        while let Ok(command) = usb::COMMANDS.try_receive() {
+        while let Ok((source, line)) = link::OTA.try_receive() {
+            ota.command(source, &line);
+        }
+        ota.poll(&mut watchdog);
+        if ota_announce && start.duration_since(boot) > Duration::from_secs(3) {
+            ota_announce = false;
+            link::write(&format!("{}\r\n", ota.describe()));
+        }
+        while let Ok(command) = link::COMMANDS.try_receive() {
             match command {
-                usb::Command::Key(key) => app.key(key),
-                usb::Command::Mirror(on) => {
-                    mirror = on;
-                    if !mirror {
-                        text = String::new();
-                    }
-                }
-                usb::Command::Screen => snapshot = true,
-                usb::Command::Bootsel => usb::reboot(0x0002),
-                usb::Command::Demo => app.start_demo(),
-                usb::Command::Ambient => app.start_ambient(),
-                usb::Command::Help => {
-                    usb::write("commands: mirror [on|off] | screen | demo | ambient | key up|down|left|right|select | bootsel\r\n");
-                }
+                link::Command::Key(key) => app.key(key),
+                link::Command::Screen => snapshot = true,
+                link::Command::Bootsel => usb::reboot(0x0002),
+                link::Command::Demo => app.start_demo(),
+                link::Command::Ambient => app.start_ambient(),
+                link::Command::Help => link::write(link::HELP),
             }
+        }
+        let mirror = link::mirroring();
+        if !mirror && !text.is_empty() {
+            text = String::new();
         }
 
         let readings = badge_ui::Sensors {
@@ -268,15 +325,18 @@ async fn main(_spawner: Spawner) {
         frame_count = frame_count.wrapping_add(1);
         // Mirror every 3rd frame, skipping frames the host hasn't caught up with.
         if mirror && frame_count.is_multiple_of(3) {
-            badge_ui::mirror::ansi(completed.buffer, &mut text);
-            usb::write(&text);
+            // Reserved once at full size, so it never doubles.
+            text.reserve(MIRROR_MAX.saturating_sub(text.capacity()));
+            if badge_ui::mirror::ansi(completed.buffer, &mut text, MIRROR_MAX) {
+                link::write_frame(&text);
+            }
         }
         if core::mem::take(&mut snapshot) {
             badge_ui::mirror::text(completed.buffer, &mut text);
-            usb::write(&text);
+            link::write(&text);
         }
         for line in app.take_log() {
-            usb::write(&format!("[{:>7}] {line}\r\n", Instant::now().as_millis()));
+            link::write(&format!("[{:>7}] {line}\r\n", Instant::now().as_millis()));
         }
         leds.set(app.leds());
         if perf_since.elapsed() > Duration::from_secs(2) {
@@ -285,7 +345,7 @@ async fn main(_spawner: Spawner) {
                 "perf page {} render {}.{} backend {}.{} flush {}.{} ms heap {}K\r\n",
                 app.page, r / 10, r % 10, b / 10, b % 10, fl / 10, fl % 10, HEAP.used() / 1024
             );
-            usb::write(&line);
+            link::write(&line);
             (perf, perf_frames, perf_since) = ([0; 3], 0, Instant::now());
         }
 

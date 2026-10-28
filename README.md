@@ -14,6 +14,8 @@ pixel on screen is a terminal cell, drawn by [Mousefood] onto the badge's LCD.
   QR code. The timings and how often each scene comes up are set in `badge.toml`.
 - **USB:** the badge shows up as a serial port. `cargo badge` mirrors its screen in your
   terminal (as a Ratatui app, of course) and drives it with the arrow keys.
+- **Wireless:** the same mirror works over Bluetooth LE (`cargo badge --ble`), or over the
+  internet through a small Cloudflare relay (`cargo badge --relay`).
 
 The badge is a [Pimoroni Tufty 2350] variant: an RP2350B with 16 MB flash, a 320×240 LCD,
 five buttons, an IMU, touch pads, four case LEDs and a battery. A terminal of 6×10 px cells
@@ -98,12 +100,42 @@ stock filesystems in place, but restore from your backup to get the stock firmwa
 Without one, the build uses `badge.example.toml` and warns. Point `BADGE_CONFIG` at a file to
 keep it somewhere else.
 
+## Updates and the A/B partitions
+
+The badge can hold two firmware images in an A/B partition table (`partitions.json`): the one
+running, and a slot for the next. `cargo badge flash` writes a new build into the spare slot over
+USB, skipping 4 KB sectors that haven't changed, and reboots into it on trial. The new firmware
+confirms itself after 10 s of running; if it crashes or stalls first, the badge goes back to the
+old one. `cargo run --release` also loads the spare slot, through BOOTSEL.
+
+One-time setup, which replaces the stock MicroPython and its 1 MB ROMFS but keeps the FAT
+filesystem from 3 MB up (restore from your backup to undo):
+
+```sh
+picotool partition create partitions.json target/partitions.uf2
+cargo badge bootsel && picotool load target/partitions.uf2 && picotool reboot -u
+cargo run --release
+```
+
+Notes:
+- Each build gets a version from its build time, and the boot ROM boots the newer image.
+- Resetting the badge in the first 10 s after a USB flash lands in BOOTSEL, since the new
+  image hasn't confirmed itself yet. Flash again, or wait out the 10 s next time.
+- After a stall, panic or fault, the next boot runs in safe mode: the radio stays off and USB
+  works, so you can always flash a fix.
+- While a Bluetooth host is connected (say a `cargo badge --ble` mirror left running), use
+  `cargo run --release` rather than `cargo badge flash`: writing flash from the running firmware
+  pauses core 1, which hangs while it's busy with Bluetooth, and the watchdog resets the badge.
+- Updates over Bluetooth or the relay aren't supported yet: writing flash needs core 1 (the
+  radio) paused, and that hangs while it carries the update.
+
 ## Host tools
 
 ```sh
 cargo badge             # live mirror + log. Arrows/Enter drive the badge, d starts the demo
 cargo badge log         # follow the event and perf log
 cargo badge screen      # print the screen as text
+cargo badge flash       # update the firmware over USB (see above)
 cargo badge key left    # press a button remotely
 cargo badge demo
 cargo badge bootsel
@@ -111,16 +143,50 @@ cargo preview /tmp/out  # render every page to PNG on your laptop, no badge need
 cargo test-ui           # host tests for the UI crate
 ```
 
+Add `--ble` or `--relay` to any of these to use that link instead of USB (see below).
+
 The badge enumerates as a USB CDC serial port with the Pico SDK's IDs (`2E8A:0009`) and its
 chip ID as the serial number. Those IDs are what `picotool -f` looks for.
+
+## Bluetooth LE and the relay
+
+**Bluetooth LE** is on by default. The badge advertises the Nordic UART Service, a common BLE
+serial port, named "Ratatui badge":
+- `cargo badge --ble` finds it by that name.
+- Phone apps like nRF Connect can send it commands such as `key left`.
+- Set `[ble] name = "…"` in `badge.toml` to tell badges apart, or `enabled = false` to turn
+  Bluetooth off.
+- Set `[ble] key` (e.g. from `openssl rand -hex 32`) so only your host can drive the badge.
+  The badge and `cargo badge --ble` both read it from `badge.toml`, and each proves to the
+  other that it knows the key. Until the host has done that, the badge sends nothing and
+  ignores commands. A badge with the same name but a different key is skipped. This
+  authenticates the link but doesn't encrypt it, so someone nearby can still watch the
+  mirror stream.
+
+**The relay** is for viewers off-site, or networks where nothing can connect in to the badge:
+1. Deploy the Worker in `relay/` to Cloudflare (see [relay/README.md](relay/README.md)).
+2. Add a `[[wifi]]` network and a `[relay]` section to `badge.toml`.
+3. Flash, then run `cargo badge --relay`.
+
+The badge then joins the first network that works and holds a WebSocket open to the relay.
+
+Things to know:
+- Mirror frames are full ANSI screens. Bluetooth carries tens of KB/s at best, so busy pages
+  mirror at a low frame rate. The badge skips frames a link hasn't caught up with.
+- BOOTSEL only works over USB, since getting out of it needs a cable.
+- Mirroring is per link: each host turns its own on and off. A host re-requests it after its
+  link reconnects.
+- With neither BLE nor the relay configured, the radio stays off.
 
 ## Layout
 
 | Path | What |
 |---|---|
-| `src/` | Firmware: display driver, sensors, LEDs, USB, the main loop |
+| `src/` | Firmware: display driver, sensors, LEDs, USB, the radio (`src/radio/`), the main loop |
 | `ui/` | The Ratatui app. Hardware-free, so it runs in host tests and the preview |
-| `host/` | `cargo badge`, the USB mirror and remote control |
+| `host/` | `cargo badge`, the mirror and remote control over USB, BLE or the relay |
+| `relay/` | The Cloudflare Worker for `--relay` |
+| `firmware/` | The radio's board config (`nvram_rp2040.bin`, from Embassy) |
 | `scripts/` | Backup and restore |
 
 ## Hardware notes
@@ -135,6 +201,7 @@ Worked out from the [Tufty 2350 repo], the stock firmware, and trial and error.
 | Internal I2C1, 400 kHz | SDA 18, SCL 19: LSM6DS3TR-C IMU at `0x6A`, CAP1208 touch at `0x28` |
 | ADC | battery on 40 (×2 divider, by measurement), light sensor on 43 |
 | Case LEDs | 0–3, PWM slices 0 and 1 |
+| CYW43439 radio (RM2) | power 23, data 24, CS 25, clock 29, via PIO0 and DMA 0 |
 
 Things that took a while:
 
