@@ -160,6 +160,7 @@ dependencies = [
  "btleplug",
  "clap",
  "color-eyre",
+ "ctrlc",
  "futures",
  "getrandom 0.3.4",
  "hmac",
@@ -576,6 +577,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "ctrlc"
+version = "3.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e0b1fab2ae45819af2d0731d60f2afe17227ebb1a1538a236da84c93e9a60162"
+dependencies = [
+ "dispatch2",
+ "nix 0.31.3",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "darling"
 version = "0.24.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -707,6 +719,18 @@ dependencies = [
  "block-buffer 0.12.1",
  "const-oid",
  "crypto-common 0.2.2",
+]
+
+[[package]]
+name = "dispatch2"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1e0e367e4e7da84520dedcac1901e4da967309406d1e51017ae1abfb97adbd38"
+dependencies = [
+ "bitflags 2.13.2",
+ "block2",
+ "libc",
+ "objc2",
 ]
 
 [[package]]

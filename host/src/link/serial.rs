@@ -1,7 +1,10 @@
 //! USB serial: the badge's CDC port, found by the Pico SDK's USB IDs.
 use std::time::Duration;
 
-use color_eyre::{Result, eyre::OptionExt};
+use color_eyre::{
+    Result,
+    eyre::{OptionExt, WrapErr},
+};
 use serialport::SerialPortType;
 
 use super::Link;
@@ -20,8 +23,8 @@ pub fn open(port: Option<String>) -> Result<Link> {
             .map(|p| p.port_name.replace("/dev/tty.", "/dev/cu."))
             .ok_or_eyre("badge not found: is it plugged in and running the Ratatui firmware?")?,
     };
-    let mut port = serialport::new(&name, 115_200).timeout(Duration::from_millis(50)).open()?;
+    let mut port = serialport::new(&name, 115_200).timeout(Duration::from_millis(50)).open().wrap_err_with(|| format!("opening {name}"))?;
     // The badge only talks once the host raises DTR, as terminal programs do.
     port.write_data_terminal_ready(true)?;
-    Ok(Link { reader: port.try_clone()?, writer: port, name })
+    Ok(Link { reader: port.try_clone()?, writer: port, name, closed: None })
 }

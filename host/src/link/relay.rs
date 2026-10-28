@@ -49,6 +49,7 @@ pub fn connect(url: &str, token: &str) -> Result<Link> {
         reader: Box::new(ChannelReader::new(data_rx)),
         writer: Box::new(ChannelWriter(move |bytes| command_tx.send(bytes).is_ok())),
         name: format!("{url} (relay)"),
+        closed: None,
     })
 }
 

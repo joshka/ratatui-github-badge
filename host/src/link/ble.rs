@@ -32,6 +32,10 @@ const SERVICE: Uuid = uuid!("6e400001-b5a3-f393-e0a9-e50e24dcca9e");
 const RX: Uuid = uuid!("6e400002-b5a3-f393-e0a9-e50e24dcca9e");
 const TX: Uuid = uuid!("6e400003-b5a3-f393-e0a9-e50e24dcca9e");
 const SCAN_TIMEOUT: Duration = Duration::from_secs(10);
+/// A badge that macOS still lists but that isn't advertising can make `connect` wait forever.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+/// How often to ask whether the link is still up: notifications just stop when it drops.
+const LIVENESS: Duration = Duration::from_secs(1);
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(3);
 /// Bytes per write. Each write waits for the badge to acknowledge it, so small writes are slow
 /// (an update at 20 bytes would take most of half an hour). macOS negotiates a bigger packet
@@ -43,6 +47,7 @@ pub fn connect(name: &str, key: Option<String>) -> Result<Link> {
     let (data_tx, data_rx) = mpsc::channel();
     let (command_tx, command_rx) = tokio::sync::mpsc::unbounded_channel();
     let (ready_tx, ready_rx) = mpsc::channel();
+    let (closed_tx, closed_rx) = mpsc::channel();
     let name = name.to_string();
     thread::spawn(move || {
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
@@ -59,6 +64,7 @@ pub fn connect(name: &str, key: Option<String>) -> Result<Link> {
             let _ = peripheral.disconnect().await;
             let reason = error.map_or_else(|| "disconnected".to_string(), |e| e.to_string());
             let _ = data_tx.send(Err(io::Error::new(io::ErrorKind::BrokenPipe, reason)));
+            let _ = closed_tx.send(());
         });
     });
     let name = ready_rx.recv()??;
@@ -66,6 +72,7 @@ pub fn connect(name: &str, key: Option<String>) -> Result<Link> {
         reader: Box::new(ChannelReader::new(data_rx)),
         writer: Box::new(ChannelWriter(move |bytes| command_tx.send(bytes).is_ok())),
         name: format!("{name} (BLE)"),
+        closed: Some(closed_rx),
     })
 }
 
@@ -112,8 +119,12 @@ async fn open(name: &str, key: Option<&str>) -> Result<Peripheral> {
 }
 
 async fn try_badge(peripheral: &Peripheral, key: Option<&str>) -> Result<()> {
-    peripheral.connect().await?;
-    peripheral.discover_services().await?;
+    tokio::time::timeout(CONNECT_TIMEOUT, async {
+        peripheral.connect().await?;
+        peripheral.discover_services().await
+    })
+    .await
+    .map_err(|_| eyre!("the badge didn't accept a connection in {}s", CONNECT_TIMEOUT.as_secs()))??;
     let tx = characteristic(peripheral, TX)?;
     peripheral.subscribe(&tx).await?;
     if let Some(key) = key {
@@ -228,8 +239,14 @@ async fn pump(
 ) -> Result<()> {
     let rx = characteristic(peripheral, RX)?;
     let mut notifications = peripheral.notifications().await?;
+    let mut liveness = tokio::time::interval(LIVENESS);
     loop {
         tokio::select! {
+            _ = liveness.tick() => {
+                if !peripheral.is_connected().await? {
+                    bail!("the badge disconnected");
+                }
+            }
             notification = notifications.next() => {
                 let Some(notification) = notification else { bail!("the badge disconnected") };
                 if notification.uuid == TX && data.send(Ok(notification.value)).is_err() {

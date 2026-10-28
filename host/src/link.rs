@@ -19,6 +19,19 @@ pub struct Link {
     pub writer: Box<dyn Write + Send>,
     /// Shown in the mirror's title.
     pub name: String,
+    /// Ends once the link has hung up, after the writer is dropped. Bluetooth needs this: if
+    /// the process exits first, the badge thinks it is still connected and stops advertising.
+    pub closed: Option<Receiver<()>>,
+}
+
+impl Link {
+    /// Hang up, waiting a moment for the transport to tell the badge.
+    pub fn close(writer: Box<dyn Write + Send>, closed: Option<Receiver<()>>) {
+        drop(writer);
+        if let Some(closed) = closed {
+            let _ = closed.recv_timeout(Duration::from_secs(2));
+        }
+    }
 }
 
 /// Bytes from a transport thread. Reads time out like the serial port's, so callers can poll.

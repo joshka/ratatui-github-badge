@@ -6,7 +6,11 @@
 use std::{
     collections::VecDeque,
     io::{Read, Write},
-    sync::mpsc::{self, Receiver},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc::{self, Receiver},
+    },
     thread,
     path::PathBuf,
     time::{Duration, Instant},
@@ -103,34 +107,118 @@ impl Key {
     }
 }
 
+/// Opens a fresh link of the kind picked on the command line, so the mirror and the log can
+/// come back after the badge reboots, is reflashed or drops off the air.
+type Connect = Arc<dyn Fn() -> Result<Link> + Send + Sync>;
+
+/// How long to wait between attempts to reach the badge again.
+const RETRY: Duration = Duration::from_secs(1);
+/// The badge logs a perf line every 2 s, so this much silence means the link is dead even if
+/// the transport hasn't noticed.
+const SILENCE: Duration = Duration::from_secs(15);
+
 fn main() -> Result<()> {
     color_eyre::install()?;
     let cli = Cli::parse();
-    let port = if cli.ble {
+    let connect: Connect = if cli.ble {
         let (name, key) = ble_config();
-        link::ble(&name, key)?
+        Arc::new(move || link::ble(&name, key.clone()))
     } else if cli.relay {
         let (url, token) = relay_config()?;
-        link::relay(&url, &token)?
+        Arc::new(move || link::relay(&url, &token))
     } else {
-        link::serial(cli.port)?
+        let port = cli.port;
+        Arc::new(move || link::serial(port.clone()))
     };
     match cli.command.unwrap_or(Command::Mirror) {
         Command::Mirror => {
             let terminal = ratatui::init();
-            let result = Mirror::new(port)?.run(terminal);
+            let result = Mirror::new(connect).run(terminal);
             ratatui::restore();
             result
         }
-        Command::Log => follow(port, None),
-        Command::Screen => one_shot(port, "screen"),
-        Command::Key { key } => one_shot(port, &format!("key {}", key.name())),
-        Command::Demo => one_shot(port, "demo"),
-        Command::Ambient => one_shot(port, "ambient"),
-        Command::Bootsel => one_shot(port, "bootsel"),
+        Command::Log => follow_forever(&connect),
+        Command::Screen => one_shot(connect()?, "screen"),
+        Command::Key { key } => one_shot(connect()?, &format!("key {}", key.name())),
+        Command::Demo => one_shot(connect()?, "demo"),
+        Command::Ambient => one_shot(connect()?, "ambient"),
+        Command::Bootsel => one_shot(connect()?, "bootsel"),
         Command::Flash { .. } if cli.ble || cli.relay => bail!("updates only work over USB"),
-        Command::Flash { elf } => flash::flash(port, &elf),
-        Command::Send { line } => one_shot(port, &line),
+        Command::Flash { elf } => flash::flash(connect()?, &elf),
+        Command::Send { line } => one_shot(connect()?, &line),
+    }
+}
+
+enum Attempt {
+    Failed(String),
+    Connected(Link),
+}
+
+/// Keep trying to open a link on a background thread until one opens.
+fn reconnect(connect: &Connect) -> Receiver<Attempt> {
+    let (tx, rx) = mpsc::channel();
+    let connect = connect.clone();
+    thread::spawn(move || {
+        loop {
+            match connect() {
+                Ok(link) => {
+                    let _ = tx.send(Attempt::Connected(link));
+                    return;
+                }
+                Err(error) => {
+                    if tx.send(Attempt::Failed(format!("{error:#}"))).is_err() {
+                        return;
+                    }
+                }
+            }
+            thread::sleep(RETRY);
+        }
+    });
+    rx
+}
+
+/// Set by Ctrl-C while `log` has a link open, so it can hang up before exiting.
+static STOP: AtomicBool = AtomicBool::new(false);
+static FOLLOWING: AtomicBool = AtomicBool::new(false);
+
+/// `cargo badge log`: follow the log across reboots and reflashes.
+fn follow_forever(connect: &Connect) -> Result<()> {
+    // Without a link there's nothing to hang up, so exit straight away.
+    ctrlc::set_handler(|| {
+        if FOLLOWING.load(Ordering::SeqCst) {
+            STOP.store(true, Ordering::SeqCst);
+        } else {
+            std::process::exit(130);
+        }
+    })?;
+    let mut last_error = String::new();
+    loop {
+        match connect() {
+            Ok(link) => {
+                if !last_error.is_empty() {
+                    eprintln!("-- connected to {}", link.name);
+                    last_error.clear();
+                }
+                FOLLOWING.store(true, Ordering::SeqCst);
+                let result = follow(link, None);
+                FOLLOWING.store(false, Ordering::SeqCst);
+                if STOP.load(Ordering::SeqCst) {
+                    return Ok(());
+                }
+                if let Err(error) = result {
+                    eprintln!("-- {error}; reconnecting…");
+                    last_error = error.to_string();
+                }
+            }
+            Err(error) => {
+                let error = format!("{error:#}");
+                if error != last_error {
+                    eprintln!("-- {error}; retrying…");
+                    last_error = error;
+                }
+            }
+        }
+        thread::sleep(RETRY);
     }
 }
 
@@ -177,20 +265,35 @@ fn one_shot(mut port: Link, line: &str) -> Result<()> {
 }
 
 /// Copy log output to stdout, skipping any mirror frames.
+/// Copy log output to stdout, skipping any mirror frames. Without a duration, follow until
+/// the link drops or goes silent.
 fn follow(port: Link, duration: Option<Duration>) -> Result<()> {
-    let _writer = port.writer;
     let events = reader(port.reader);
+    let result = copy_log(&events, duration);
+    Link::close(port.writer, port.closed);
+    result
+}
+
+fn copy_log(events: &Receiver<Incoming>, duration: Option<Duration>) -> Result<()> {
     let mut stdout = std::io::stdout();
-    let deadline = duration.map(|d| std::time::Instant::now() + d);
+    let deadline = duration.map(|d| Instant::now() + d);
+    let mut last_data = Instant::now();
     loop {
-        let wait = deadline.map_or(Duration::from_secs(3600), |d| d.saturating_duration_since(std::time::Instant::now()));
-        match events.recv_timeout(wait) {
+        if STOP.load(Ordering::SeqCst) || deadline.is_some_and(|d| Instant::now() >= d) {
+            return Ok(());
+        }
+        if deadline.is_none() && last_data.elapsed() > SILENCE {
+            bail!("no data from the badge for {}s", SILENCE.as_secs());
+        }
+        // Wake often enough to notice Ctrl-C.
+        match events.recv_timeout(Duration::from_millis(100)) {
             Ok(Incoming::Line(line)) => writeln!(stdout, "{line}")?,
             Ok(Incoming::Frame(_)) => {}
             Ok(Incoming::Closed(error)) => bail!("badge disconnected: {error}"),
-            Err(mpsc::RecvTimeoutError::Timeout) => return Ok(()),
+            Err(mpsc::RecvTimeoutError::Timeout) => continue,
             Err(mpsc::RecvTimeoutError::Disconnected) => bail!("badge disconnected"),
         }
+        last_data = Instant::now();
     }
 }
 
@@ -251,11 +354,20 @@ fn reader(mut port: Box<dyn Read + Send>) -> Receiver<Incoming> {
 }
 
 struct Mirror {
-    port: Box<dyn Write + Send>,
+    connect: Connect,
+    /// The open link's writer and incoming stream, or `None` while reconnecting.
+    port: Option<(Box<dyn Write + Send>, Receiver<Incoming>)>,
+    /// See [`Link::closed`].
+    closed: Option<Receiver<()>>,
+    /// When anything last arrived, to spot a link that died without an error.
+    last_data: Instant,
+    /// Set while a background thread is trying to reach the badge.
+    connecting: Option<Receiver<Attempt>>,
+    /// Why the last attempt failed, shown while reconnecting.
+    link_error: String,
     name: String,
     last_frame: Instant,
     last_request: Instant,
-    events: Receiver<Incoming>,
     screen: Text<'static>,
     log: VecDeque<String>,
     perf: String,
@@ -264,31 +376,90 @@ struct Mirror {
 }
 
 impl Mirror {
-    fn new(link: Link) -> Result<Self> {
-        Ok(Self {
-            port: link.writer,
-            name: link.name,
+    fn new(connect: Connect) -> Self {
+        Self {
+            connecting: Some(reconnect(&connect)),
+            connect,
+            port: None,
+            closed: None,
+            last_data: Instant::now(),
+            link_error: String::new(),
+            name: "connecting…".to_string(),
             last_frame: Instant::now(),
             last_request: Instant::now(),
-            events: reader(link.reader),
-            screen: Text::from("waiting for the first frame…"),
+            screen: Text::from("looking for the badge…"),
             log: VecDeque::new(),
             perf: String::new(),
             frames: 0,
             status: String::new(),
-        })
+        }
     }
 
     fn run(mut self, mut terminal: DefaultTerminal) -> Result<()> {
-        send(self.port.as_mut(), "mirror on")?;
         let result = self.event_loop(&mut terminal);
-        let _ = send(self.port.as_mut(), "mirror off");
+        if let Some((mut writer, _)) = self.port.take() {
+            let _ = send(writer.as_mut(), "mirror off");
+            Link::close(writer, self.closed.take());
+        }
         result
+    }
+
+    fn push_log(&mut self, line: String) {
+        self.log.push_back(line);
+        if self.log.len() > LOG_LINES {
+            self.log.pop_front();
+        }
+    }
+
+    /// Drop the link and start looking for the badge again, keeping the log and last screen.
+    fn disconnected(&mut self, reason: &str) {
+        // Hang up properly, or a Bluetooth badge won't advertise for us again for a while.
+        if let Some((writer, _)) = self.port.take() {
+            Link::close(writer, self.closed.take());
+        }
+        self.push_log(format!("-- disconnected: {reason}"));
+        self.link_error.clear();
+        self.connecting = Some(reconnect(&self.connect));
+    }
+
+    fn poll_connecting(&mut self) {
+        let Some(connecting) = &self.connecting else { return };
+        while let Ok(attempt) = connecting.try_recv() {
+            match attempt {
+                Attempt::Failed(error) => self.link_error = error,
+                Attempt::Connected(link) => {
+                    self.connecting = None;
+                    self.name = link.name;
+                    self.port = Some((link.writer, reader(link.reader)));
+                    self.closed = link.closed;
+                    self.last_data = Instant::now();
+                    self.push_log(format!("-- connected to {}", self.name));
+                    self.link_error.clear();
+                    self.last_frame = Instant::now();
+                    self.command("mirror on");
+                    return;
+                }
+            }
+        }
+    }
+
+    /// Send a line to the badge; a failed write means the link has gone.
+    fn command(&mut self, line: &str) {
+        let Some((writer, _)) = &mut self.port else {
+            self.status = format!("{line}: not connected");
+            return;
+        };
+        if let Err(error) = send(writer.as_mut(), line) {
+            self.disconnected(&error.to_string());
+        }
+        self.last_request = Instant::now();
     }
 
     fn event_loop(&mut self, terminal: &mut DefaultTerminal) -> Result<()> {
         loop {
-            while let Ok(incoming) = self.events.try_recv() {
+            self.poll_connecting();
+            while let Some(incoming) = self.port.as_ref().and_then(|(_, events)| events.try_recv().ok()) {
+                self.last_data = Instant::now();
                 match incoming {
                     Incoming::Frame(bytes) => {
                         self.screen = bytes.into_text()?;
@@ -297,19 +468,19 @@ impl Mirror {
                     }
                     Incoming::Line(line) if line.starts_with("perf ") => self.perf = line,
                     Incoming::Line(line) if line.is_empty() => {}
-                    Incoming::Line(line) => {
-                        self.log.push_back(line);
-                        if self.log.len() > LOG_LINES {
-                            self.log.pop_front();
-                        }
-                    }
-                    Incoming::Closed(error) => bail!("badge disconnected: {error}"),
+                    Incoming::Line(line) => self.push_log(line),
+                    Incoming::Closed(error) => self.disconnected(&error),
                 }
             }
-            // The badge forgets the request when a BLE or relay link drops and reconnects.
-            if self.last_frame.elapsed() > Duration::from_secs(2) && self.last_request.elapsed() > Duration::from_secs(3) {
-                send(self.port.as_mut(), "mirror on")?;
-                self.last_request = Instant::now();
+            if self.port.is_some() && self.last_data.elapsed() > SILENCE {
+                self.disconnected(&format!("no data for {}s", SILENCE.as_secs()));
+            }
+            // The badge forgets the request when it reboots or a BLE or relay link drops.
+            if self.port.is_some()
+                && self.last_frame.elapsed() > Duration::from_secs(2)
+                && self.last_request.elapsed() > Duration::from_secs(3)
+            {
+                self.command("mirror on");
             }
             terminal.draw(|f| self.draw(f))?;
             if !event::poll(Duration::from_millis(16))? {
@@ -331,7 +502,7 @@ impl Mirror {
                 _ => continue,
             };
             self.status = command.to_string();
-            send(self.port.as_mut(), command)?;
+            self.command(command);
         }
     }
 
@@ -344,10 +515,14 @@ impl Mirror {
             Layout::vertical([Constraint::Length(SCREEN.1 + 2), Constraint::Fill(1)]).areas(main)
         };
         let badge = Rect { height: badge.height.min(SCREEN.1 + 2), ..badge };
-        let title = Line::from(vec![
-            " badge ".bold(),
-            Span::raw(format!("{} · {} frames ", self.name, self.frames)).dark_gray(),
-        ]);
+        let link = if self.port.is_some() {
+            Span::raw(format!("{} · {} frames ", self.name, self.frames)).dark_gray()
+        } else if self.link_error.is_empty() {
+            Span::raw("reconnecting… ").yellow()
+        } else {
+            Span::raw(format!("reconnecting… ({}) ", self.link_error)).yellow()
+        };
+        let title = Line::from(vec![" badge ".bold(), link]);
         f.render_widget(Paragraph::new(self.screen.clone()).block(Block::bordered().title(title)), badge);
 
         let block = Block::bordered().title(" log ".bold()).title_bottom(Line::from(self.perf.as_str()).dark_gray());

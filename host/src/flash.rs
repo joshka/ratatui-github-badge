@@ -29,7 +29,7 @@ const RETRIES: usize = 3;
 pub fn flash(link: Link, elf: &Path) -> Result<()> {
     let image = image(elf)?;
     let sectors = image.len().div_ceil(SECTOR);
-    let Link { mut writer, reader: port, name } = link;
+    let Link { mut writer, reader: port, name, .. } = link;
     let events = reader(port);
     let mut out = std::io::stdout();
     writeln!(out, "flashing {} ({} KB, {sectors} sectors) over {name}", elf.display(), image.len() / 1024)?;
