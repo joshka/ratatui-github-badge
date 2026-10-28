@@ -76,7 +76,7 @@ fn demo_starts_on_held_select_cycles_pages_and_first_press_only_wakes() {
     for _ in 0..(60_000 / 100) {
         app.update(100, sensors());
     }
-    assert!(!app.demo(), "demo must not start by itself");
+    assert!(app.ambient(), "idling drifts into ambient mode, not the tour");
     let mut held = sensors();
     held.buttons = 0b10000;
     for _ in 0..11 {
@@ -115,4 +115,33 @@ fn touch_wakes_demo() {
     s.touch = 0b1;
     app.update(33, s);
     assert!(!app.demo());
+}
+
+#[test]
+fn ambient_starts_when_idle_shows_only_scenes_and_wakes() {
+    let mut app = App::new();
+    for _ in 0..(29_000 / 100) {
+        app.update(100, sensors());
+    }
+    assert!(!app.demo());
+    app.key(Key::Right);
+    for _ in 0..(29_000 / 100) {
+        app.update(100, sensors());
+    }
+    assert!(!app.demo(), "a press restarts the idle timer");
+    for _ in 0..(2_000 / 100) {
+        app.update(100, sensors());
+    }
+    assert!(app.ambient());
+    let mut seen = std::collections::BTreeSet::new();
+    for _ in 0..(110_000 / 50) {
+        app.update(50, sensors());
+        seen.insert(app.page);
+        render(&mut app);
+    }
+    assert_eq!(seen.len(), 5, "ambient visited {seen:?}");
+    assert!(seen.iter().all(|&p| p >= 7), "ambient showed a menu page: {seen:?}");
+    app.key(Key::Down);
+    assert!(!app.demo());
+    assert_eq!(app.page, 0);
 }

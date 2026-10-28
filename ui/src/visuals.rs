@@ -269,3 +269,168 @@ pub fn hsv(h: u32, s: u8, v: u8) -> Color {
     };
     Color::Rgb((r + m) as u8, (g + m) as u8, (b + m) as u8)
 }
+
+/// A cheap sine stand-in: phase 0..256 is one turn, output is -128..=128 (two parabolas).
+pub fn wave(phase: u32) -> i32 {
+    let half = (phase & 127) as i32;
+    let v = half * (128 - half) / 32;
+    if phase & 128 == 0 { v } else { -v }
+}
+
+/// Old-school demoscene plasma: a few interfering waves mapped through a cycling palette.
+pub struct Plasma {
+    pub t: u32,
+}
+
+impl Widget for &Plasma {
+    fn render(self, area: Rect, buf: &mut Buffer) {
+        let t = self.t;
+        let px = |x: u32, y: u32| {
+            let (cx, cy) = (x as i32 - 26, y as i32 - 24);
+            let v = wave(x * 5 + t)
+                + wave(y * 7 + t * 2 / 3)
+                + wave((x + y) * 3 + t / 2)
+                + wave(((cx * cx + cy * cy) as u32) / 6 + t * 3 / 2);
+            // v spans -512..512; one sweep of v is 1.5 trips round the hue wheel.
+            let v = (v + 512) as u32;
+            hsv(v * 540 / 1024 + t / 3, 200, (140 + wave(v / 2 + t) / 2 + 60).clamp(0, 255) as u8)
+        };
+        let area = area.intersection(buf.area);
+        for row in 0..area.height as u32 {
+            for col in 0..area.width as u32 {
+                buf[(area.x + col as u16, area.y + row as u16)]
+                    .set_symbol("▀")
+                    .set_fg(px(col, row * 2))
+                    .set_bg(px(col, row * 2 + 1));
+            }
+        }
+    }
+}
+
+const RAIN_GLYPHS: &[u8] = b"ratui01<>{}[]|/\\=+*#$%&;:.~^";
+
+/// Digital rain: one falling drop per column leaving a fading trail of glyphs.
+pub struct Rain {
+    width: usize,
+    height: usize,
+    /// Head row in 1/16ths, speed in 1/16 rows per step, and trail length, per column.
+    drops: Vec<(i32, i32, i32)>,
+    glyphs: Vec<u8>,
+}
+
+impl Rain {
+    pub fn new(width: usize, height: usize, rng: &mut Rng) -> Self {
+        let glyphs = (0..width * height).map(|_| RAIN_GLYPHS[rng.next_u32() as usize % RAIN_GLYPHS.len()]).collect();
+        let mut rain = Self { width, height, drops: vec![(0, 0, 0); width], glyphs };
+        for x in 0..width {
+            rain.respawn(x, rng);
+            rain.drops[x].0 = (rng.next_u32() % (height as u32 * 32)) as i32;
+        }
+        rain
+    }
+
+    fn respawn(&mut self, x: usize, rng: &mut Rng) {
+        let r = rng.next_u32();
+        let speed = 6 + (r % 14) as i32;
+        let len = 5 + ((r >> 8) % 14) as i32;
+        let start = -(((r >> 16) % (self.height as u32 * 16)) as i32);
+        self.drops[x] = (start, speed, len);
+    }
+
+    pub fn step(&mut self, rng: &mut Rng) {
+        for x in 0..self.width {
+            let (y, speed, len) = &mut self.drops[x];
+            *y += *speed;
+            if *y / 16 - *len > self.height as i32 {
+                self.respawn(x, rng);
+            }
+        }
+        // A few glyphs flicker each step.
+        for _ in 0..self.width / 4 {
+            let i = rng.next_u32() as usize % self.glyphs.len();
+            self.glyphs[i] = RAIN_GLYPHS[rng.next_u32() as usize % RAIN_GLYPHS.len()];
+        }
+    }
+}
+
+pub struct RainView<'a> {
+    pub rain: &'a Rain,
+    pub head: Color,
+    /// Trail color at full brightness, faded toward black along the trail.
+    pub trail: (u8, u8, u8),
+}
+
+impl Widget for RainView<'_> {
+    fn render(self, area: Rect, buf: &mut Buffer) {
+        let r = self.rain;
+        let area = area.intersection(buf.area);
+        for col in 0..(area.width as usize).min(r.width) {
+            let (y, _, len) = r.drops[col];
+            let head = y / 16;
+            for row in 0..(area.height as usize).min(r.height) {
+                let behind = head - row as i32;
+                if !(0..len).contains(&behind) {
+                    continue;
+                }
+                let color = if behind == 0 {
+                    self.head
+                } else {
+                    let k = (len - behind) as u32 * 255 / len as u32;
+                    let (cr, cg, cb) = self.trail;
+                    Color::Rgb((cr as u32 * k / 255) as u8, (cg as u32 * k / 255) as u8, (cb as u32 * k / 255) as u8)
+                };
+                let g = r.glyphs[row * r.width + col];
+                let mut tmp = [0u8; 4];
+                buf[(area.x + col as u16, area.y + row as u16)]
+                    .set_symbol((g as char).encode_utf8(&mut tmp))
+                    .set_fg(color);
+            }
+        }
+    }
+}
+
+/// Stars flying toward the viewer, in a -1..1 square at depth z (1 far, ~0 near).
+pub struct Warp {
+    stars: Vec<(f32, f32, f32)>,
+}
+
+impl Warp {
+    pub fn new(count: usize, rng: &mut Rng) -> Self {
+        let stars = (0..count)
+            .map(|_| {
+                let z = Self::unit(rng);
+                Self::star(rng, z)
+            })
+            .collect();
+        Self { stars }
+    }
+
+    fn unit(rng: &mut Rng) -> f32 {
+        (rng.next_u32() % 10_000) as f32 / 10_000.0
+    }
+
+    fn star(rng: &mut Rng, z: f32) -> (f32, f32, f32) {
+        let x = Self::unit(rng) * 2.0 - 1.0;
+        (x, Self::unit(rng) * 2.0 - 1.0, z.max(0.05))
+    }
+
+    /// Move every star closer by `speed` (depth units per step); recycle ones that pass.
+    pub fn step(&mut self, speed: f32, rng: &mut Rng) {
+        for i in 0..self.stars.len() {
+            self.stars[i].2 -= speed;
+            if self.stars[i].2 <= 0.02 {
+                self.stars[i] = Self::star(rng, 1.0);
+            }
+        }
+    }
+
+    /// Streaks from where each star was `trail` depth ago to where it is now, in canvas
+    /// coordinates centered on (0, 0) with the given half-extents, nearest last.
+    pub fn streaks(&self, trail: f32, half: (f64, f64), mut out: impl FnMut(usize, (f64, f64), (f64, f64))) {
+        let project = |x: f32, y: f32, z: f32| ((x / z) as f64 * half.0 * 0.3, (y / z) as f64 * half.1 * 0.3);
+        for &(x, y, z) in &self.stars {
+            let depth = if z < 0.25 { 2 } else if z < 0.55 { 1 } else { 0 };
+            out(depth, project(x, y, z + trail), project(x, y, z));
+        }
+    }
+}

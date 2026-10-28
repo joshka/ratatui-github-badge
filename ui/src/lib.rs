@@ -53,7 +53,10 @@ const PAGE_DEBUG: usize = 6;
 // Full-screen demo scenes, not in the tab bar.
 const PAGE_BILLBOARD: usize = 7;
 const PAGE_LIFE: usize = 8;
-const SCENE_NAMES: [&str; 2] = ["billboard", "life"];
+const PAGE_PLASMA: usize = 9;
+const PAGE_RAIN: usize = 10;
+const PAGE_WARP: usize = 11;
+const SCENE_NAMES: [&str; 5] = ["billboard", "life", "plasma", "rain", "warp"];
 
 const MARQUEE: &str = "ratatui.rs ~ github.com/ratatui/ratatui ~ ";
 const FIRE_ROWS: usize = 18;
@@ -80,6 +83,15 @@ const DEMO: [(usize, usize, u32); 11] = [
     (PAGE_LIFE, 0, 12000),
     (PAGE_GET, 0, 6000),
     (PAGE_GET, 1, 6000),
+];
+/// With no input for this long, the badge drifts into ambient mode: just the scenes.
+const IDLE_MS: u32 = 30_000;
+const AMBIENT: [(usize, usize, u32); 5] = [
+    (PAGE_BILLBOARD, 0, 20000),
+    (PAGE_PLASMA, 0, 20000),
+    (PAGE_LIFE, 0, 25000),
+    (PAGE_RAIN, 0, 20000),
+    (PAGE_WARP, 0, 20000),
 ];
 
 const SUBTABS: [&str; 4] = ["stack", "bars", "gauges", "fx"];
@@ -230,6 +242,9 @@ pub struct App {
     maze_last_ms: Option<u32>,
     maze_best_ms: Option<u32>,
     demo: bool,
+    /// The running script: `DEMO` (the booth tour) or `AMBIENT` (scenes only).
+    script: &'static [(usize, usize, u32)],
+    idle_ms: u32,
     demo_step: usize,
     demo_step_ms: u32,
     select_held_ms: u32,
@@ -238,6 +253,8 @@ pub struct App {
     rng: visuals::Rng,
     fire: visuals::Fire,
     life: visuals::Life,
+    rain: visuals::Rain,
+    warp: visuals::Warp,
     led_flash_ms: Option<u32>,
     log: Vec<String>,
     fx: EffectManager<u8>,
@@ -282,6 +299,8 @@ impl App {
             maze_last_ms: None,
             maze_best_ms: None,
             demo: false,
+            script: &DEMO,
+            idle_ms: 0,
             demo_step: 0,
             demo_step_ms: 0,
             select_held_ms: 0,
@@ -290,6 +309,8 @@ impl App {
             rng: visuals::Rng(0x1234_5678),
             fire: visuals::Fire::new(53, FIRE_ROWS),
             life: visuals::Life::new(53, 46),
+            rain: visuals::Rain::new(53, 24, &mut visuals::Rng(0x9e37_79b9)),
+            warp: visuals::Warp::new(90, &mut visuals::Rng(0x85eb_ca6b)),
             led_flash_ms: None,
             log: Vec::new(),
             fx: EffectManager::default(),
@@ -322,6 +343,11 @@ impl App {
 
     pub fn demo(&self) -> bool {
         self.demo
+    }
+
+    /// Whether the running demo is the idle scenes rather than the booth tour.
+    pub fn ambient(&self) -> bool {
+        self.demo && core::ptr::eq(self.script, &AMBIENT[..])
     }
 
     /// Events since the last call, for the USB log.
@@ -364,6 +390,7 @@ impl App {
 
     /// The first input during the demo only ends it.
     fn wake(&mut self) -> bool {
+        self.idle_ms = 0;
         if !self.demo {
             return false;
         }
@@ -496,16 +523,29 @@ impl App {
         }
     }
 
-    /// Start the booth demo (hold Select, or the USB `demo` command).
+    /// Start the booth demo (hold Select, or the USB `demo` command). Takes over from
+    /// ambient mode.
     pub fn start_demo(&mut self) {
-        if self.demo {
+        if self.demo && !self.ambient() {
             return;
         }
-        self.demo = true;
-        self.demo_started_ms = self.now_ms;
+        self.run_script(&DEMO, "demo on");
         self.demo_guard = true;
-        self.log.push("demo on".into());
-        self.demo_step = DEMO.len() - 1;
+    }
+
+    /// Start the idle scenes (after `IDLE_MS` without input, or the USB `ambient` command).
+    pub fn start_ambient(&mut self) {
+        if !self.demo {
+            self.run_script(&AMBIENT, "ambient on");
+        }
+    }
+
+    fn run_script(&mut self, script: &'static [(usize, usize, u32)], log: &str) {
+        self.demo = true;
+        self.script = script;
+        self.demo_started_ms = self.now_ms;
+        self.log.push(log.into());
+        self.demo_step = script.len() - 1;
         self.demo_step_ms = u32::MAX;
         self.flash_leds();
     }
@@ -514,7 +554,7 @@ impl App {
         // Physical Select is bit 4 of `buttons`, in `Key::ALL` order.
         if self.sensors.buttons & 0b10000 != 0 && self.sensors.buttons & 0b00100 == 0 {
             self.select_held_ms = self.select_held_ms.saturating_add(dt_ms);
-            if self.select_held_ms >= DEMO_HOLD_MS && !self.demo {
+            if self.select_held_ms >= DEMO_HOLD_MS && (!self.demo || self.ambient()) {
                 self.select_held_ms = 0;
                 self.start_demo();
             }
@@ -522,6 +562,12 @@ impl App {
             self.select_held_ms = 0;
         }
         if !self.demo {
+            // The maze is played by tilting, so it never counts as idle.
+            let busy = self.sensors.buttons != 0 || self.page == PAGE_MAZE;
+            self.idle_ms = if busy { 0 } else { self.idle_ms.saturating_add(dt_ms) };
+            if self.idle_ms >= IDLE_MS {
+                self.start_ambient();
+            }
             return;
         }
         if self.demo_guard
@@ -531,11 +577,11 @@ impl App {
             self.demo_guard = false;
         }
         self.demo_step_ms = self.demo_step_ms.saturating_add(dt_ms);
-        let (_, _, duration) = DEMO[self.demo_step];
+        let (_, _, duration) = self.script[self.demo_step];
         if self.demo_step_ms >= duration {
-            self.demo_step = (self.demo_step + 1) % DEMO.len();
+            self.demo_step = (self.demo_step + 1) % self.script.len();
             self.demo_step_ms = 0;
-            let (page, sub, _) = DEMO[self.demo_step];
+            let (page, sub, _) = self.script[self.demo_step];
             if page == PAGE_GET {
                 self.qr = sub;
             }
@@ -599,6 +645,14 @@ impl App {
         if self.page == PAGE_BILLBOARD {
             self.fire.step(&mut self.rng);
         }
+        if self.page == PAGE_RAIN && self.now_ms / 40 != (self.now_ms - dt_ms) / 40 {
+            self.rain.step(&mut self.rng);
+        }
+        if self.page == PAGE_WARP {
+            // Lean the badge to steer; the stars speed up and slow down on a slow swell.
+            let swell = visuals::wave(self.now_ms / 40) as f32 / 128.0;
+            self.warp.step((0.012 + swell * 0.006) * dt_ms as f32 / 33.0, &mut self.rng);
+        }
         if self.page == PAGE_LIFE && self.now_ms / 120 != (self.now_ms - dt_ms) / 120 {
             self.life.step();
             if self.life.alive() < 40 {
@@ -644,10 +698,12 @@ impl App {
         let area = f.area();
         f.render_widget(Block::new().style(Style::new().bg(BG).fg(TEXT)), area);
         if self.page >= PAGE_BILLBOARD {
-            if self.page == PAGE_BILLBOARD {
-                self.draw_billboard(f);
-            } else {
-                self.draw_life(f);
+            match self.page {
+                PAGE_BILLBOARD => self.draw_billboard(f),
+                PAGE_LIFE => self.draw_life(f),
+                PAGE_PLASMA => self.draw_plasma(f),
+                PAGE_RAIN => self.draw_rain(f),
+                _ => self.draw_warp(f),
             }
             let dt = Duration::from_millis(self.dt_ms);
             self.fx.process_effects(dt, f.buffer_mut(), area);
@@ -882,6 +938,61 @@ impl App {
         f.render_widget(
             Paragraph::new("Conway's Life, seeded with the Ratatui wordmark").centered().style(DIM),
             Rect::new(0, 23, area.width, 1),
+        );
+    }
+
+    fn draw_plasma(&mut self, f: &mut Frame) {
+        let area = f.area();
+        f.render_widget(&visuals::Plasma { t: self.now_ms / 12 }, area);
+        let big = BigText::builder()
+            .pixel_size(PixelSize::Quadrant)
+            .style(Style::new().fg(Color::Rgb(255, 255, 255)))
+            .lines(vec!["ratatui".into()])
+            .centered()
+            .build();
+        f.render_widget(big, Rect::new(0, area.height / 2 - 2, area.width, 4));
+    }
+
+    fn draw_rain(&mut self, f: &mut Frame) {
+        let area = f.area();
+        let trail = match self.accent() {
+            Color::Rgb(r, g, b) => (r, g, b),
+            _ => (80, 240, 200),
+        };
+        f.render_widget(visuals::RainView { rain: &self.rain, head: Color::Rgb(255, 255, 255), trail }, area);
+        let msg = " ratatui.rs ";
+        let x = (area.width - msg.len() as u16) / 2;
+        let style = Style::new().fg(BG).bg(self.accent()).bold();
+        f.render_widget(Paragraph::new(msg).style(style), Rect::new(x, area.height / 2, msg.len() as u16, 1));
+    }
+
+    fn draw_warp(&mut self, f: &mut Frame) {
+        let area = f.area();
+        // Canvas units: one per braille dot (2x4 per cell), centered and nudged by the tilt.
+        let half = (area.width as f64, area.height as f64 * 2.0);
+        let (tx, ty) = (self.tilt.0 as f64 * half.0 * 0.4, self.tilt.1 as f64 * half.1 * 0.4);
+        let mut layers: [Vec<(f64, f64, f64, f64)>; 3] = [Vec::new(), Vec::new(), Vec::new()];
+        self.warp.streaks(0.06, half, |depth, (x1, y1), (x2, y2)| {
+            layers[depth].push((x1 - tx, y1 - ty, x2 - tx, y2 - ty));
+        });
+        let colors = [DIM, Color::Rgb(170, 180, 220), Color::Rgb(255, 255, 255)];
+        let accent = self.accent();
+        f.render_widget(
+            Canvas::default()
+                .marker(Marker::Braille)
+                .background_color(BG)
+                .x_bounds([-half.0, half.0])
+                .y_bounds([-half.1, half.1])
+                .paint(|ctx| {
+                    for (layer, color) in layers.iter().zip(colors) {
+                        for &(x1, y1, x2, y2) in layer {
+                            ctx.draw(&CanvasLine { x1, y1, x2, y2, color });
+                        }
+                        ctx.layer();
+                    }
+                    ctx.print(-4.0, 0.0, Span::styled("ratatui", Style::new().fg(accent).bold()));
+                }),
+            area,
         );
     }
 

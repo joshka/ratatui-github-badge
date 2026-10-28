@@ -219,8 +219,9 @@ async fn main(_spawner: Spawner) {
                 usb::Command::Screen => snapshot = true,
                 usb::Command::Bootsel => usb::reboot(0x0002),
                 usb::Command::Demo => app.start_demo(),
+                usb::Command::Ambient => app.start_ambient(),
                 usb::Command::Help => {
-                    usb::write("commands: mirror [on|off] | screen | demo | key up|down|left|right|select | bootsel\r\n");
+                    usb::write("commands: mirror [on|off] | screen | demo | ambient | key up|down|left|right|select | bootsel\r\n");
                 }
             }
         }

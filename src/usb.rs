@@ -43,6 +43,7 @@ pub enum Command {
     Screen,
     Bootsel,
     Demo,
+    Ambient,
     Help,
 }
 
@@ -146,6 +147,7 @@ fn parse(line: &str) -> Option<Command> {
         ("screen", _) => Command::Screen,
         ("bootsel", _) => Command::Bootsel,
         ("demo", _) => Command::Demo,
+        ("ambient", _) => Command::Ambient,
         ("key", Some("up")) => Command::Key(Key::Up),
         ("key", Some("down")) => Command::Key(Key::Down),
         ("key", Some("left")) => Command::Key(Key::Left),

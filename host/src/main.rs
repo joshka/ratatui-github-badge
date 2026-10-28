@@ -58,6 +58,8 @@ enum Command {
     Key { key: Key },
     /// Start the booth demo.
     Demo,
+    /// Start the idle scenes (the badge also does this after 30 s without input).
+    Ambient,
     /// Reboot into BOOTSEL for flashing (`cargo run --release` does this by itself).
     Bootsel,
 }
@@ -98,6 +100,7 @@ fn main() -> Result<()> {
         Command::Screen => one_shot(port, "screen"),
         Command::Key { key } => one_shot(port, &format!("key {}", key.name())),
         Command::Demo => one_shot(port, "demo"),
+        Command::Ambient => one_shot(port, "ambient"),
         Command::Bootsel => one_shot(port, "bootsel"),
     }
 }

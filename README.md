@@ -8,7 +8,9 @@ pixel on screen is a terminal cell, drawn by [Mousefood] onto the badge's LCD.
   details.
 - **Interaction:** the screen flips 180° when you lift the badge to read it, and parts of the
   UI drift with the tilt. Hold Select for a second to start a hands-free booth demo, which
-  includes a [tui-big-text] marquee, Doom fire and Conway's Life.
+  includes a [tui-big-text] marquee, Doom fire and Conway's Life. Left alone for 30 seconds,
+  it drifts into ambient mode: just those scenes plus plasma, digital rain and a warp
+  starfield, until you press a button.
 - **USB:** the badge shows up as a serial port. `cargo badge` mirrors its screen in your
   terminal (as a Ratatui app, of course) and drives it with the arrow keys.
 
