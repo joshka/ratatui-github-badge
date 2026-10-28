@@ -139,7 +139,7 @@ fn ambient_starts_when_idle_shows_only_scenes_and_wakes() {
         seen.insert(app.page);
         render(&mut app);
     }
-    assert_eq!(seen.len(), 5, "ambient visited {seen:?}");
+    assert_eq!(seen.len(), 4, "ambient visited {seen:?}");
     assert!(seen.iter().all(|&p| p >= 7), "ambient showed a menu page: {seen:?}");
     app.key(Key::Down);
     assert!(!app.demo());

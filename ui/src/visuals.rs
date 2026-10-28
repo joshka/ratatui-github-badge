@@ -1,14 +1,13 @@
-//! Big, high-contrast things for the booth demo: a full-width wordmark, a scrolling
-//! marquee, Doom-style fire and Conway's Life. All drawn as Ratatui cells.
+//! Big, high-contrast things for the demo scenes: a full-width wordmark, Doom-style fire,
+//! plasma, digital rain and a warp starfield. All drawn as Ratatui cells.
 use alloc::{vec, vec::Vec};
 
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    style::{Color, Style},
+    style::Color,
     widgets::Widget,
 };
-use tui_big_text::{BigText, PixelSize};
 
 use crate::wordmark::WORDMARK;
 
@@ -69,31 +68,6 @@ impl Widget for BigWordmark {
     }
 }
 
-/// Full-size `tui-big-text` scrolling right to left; only the visible glyphs are rendered.
-pub fn marquee(buf: &mut Buffer, area: Rect, text: &str, offset_cols: usize, color: impl Fn(u16) -> Color) {
-    let chars: Vec<char> = text.chars().collect();
-    let total = chars.len() * 8;
-    let offset = offset_cols % total;
-    let first = offset / 8;
-    let visible = area.width as usize / 8 + 2;
-    let window: alloc::string::String = (0..visible).map(|i| chars[(first + i) % chars.len()]).collect();
-    let mut scratch = Buffer::empty(Rect::new(0, 0, (visible * 8) as u16, 8));
-    BigText::builder()
-        .pixel_size(PixelSize::Full)
-        .lines(vec![window.into()])
-        .build()
-        .render(scratch.area, &mut scratch);
-    let shift = (offset % 8) as u16;
-    for y in 0..area.height.min(8) {
-        for x in 0..area.width {
-            let src = &scratch[(x + shift, y)];
-            if src.symbol() != " " {
-                buf[(area.x + x, area.y + y)].set_symbol(src.symbol()).set_style(Style::new().fg(color(x)));
-            }
-        }
-    }
-}
-
 /// Tiny xorshift so visuals don't need a crate.
 pub struct Rng(pub u32);
 
@@ -129,8 +103,8 @@ impl Fire {
                 let src = self.heat[y * self.width + x];
                 let drift = (r & 3) as usize;
                 let dst_x = (x + self.width + 1 - drift.min(2)) % self.width;
-                // Only ~18 rows tall, so cool faster than the original's 0-1 per row.
-                let cooled = src.saturating_sub(((r >> 2) % 5) as u8);
+                // About 1.5 per row on average, so the flames reach ~2/3 of the way up.
+                let cooled = src.saturating_sub(((r >> 2) % 4) as u8);
                 self.heat[(y - 1) * self.width + dst_x] = cooled;
             }
         }
@@ -165,91 +139,6 @@ fn fire_color(h: u8) -> Color {
         _ => (255, 255, (t - 170) * 3),
     };
     Color::Rgb(r.min(255) as u8, g.min(255) as u8, b.min(255) as u8)
-}
-
-/// Conway's Life on a wrapping half-block grid, cells remembering their age for color.
-pub struct Life {
-    pub width: usize,
-    pub height: usize,
-    age: Vec<u8>,
-}
-
-impl Life {
-    pub fn new(width: usize, height: usize) -> Self {
-        Self { width, height, age: vec![0; width * height] }
-    }
-
-    /// Seed with the wordmark letters (2 rows per pixel) plus a scatter of noise.
-    pub fn seed(&mut self, rng: &mut Rng) {
-        self.age.fill(0);
-        let (ox, oy) = ((self.width - 36) / 2, (self.height - 10) / 2);
-        for (y, row) in WORDMARK.iter().enumerate() {
-            for (x, &p) in row.iter().enumerate() {
-                if p == 1 {
-                    self.age[(oy + y * 2) * self.width + ox + x] = 1;
-                    self.age[(oy + y * 2 + 1) * self.width + ox + x] = 1;
-                }
-            }
-        }
-        for _ in 0..self.width * self.height / 12 {
-            let i = rng.next_u32() as usize % self.age.len();
-            self.age[i] = 1;
-        }
-    }
-
-    pub fn step(&mut self) {
-        let (w, h) = (self.width, self.height);
-        let mut next = vec![0u8; w * h];
-        for y in 0..h {
-            for x in 0..w {
-                let mut n = 0;
-                for (dx, dy) in [(w - 1, h - 1), (0, h - 1), (1, h - 1), (w - 1, 0), (1, 0), (w - 1, 1), (0, 1), (1, 1)] {
-                    n += (self.age[((y + dy) % h) * w + (x + dx) % w] > 0) as u8;
-                }
-                let age = self.age[y * w + x];
-                next[y * w + x] = match (age > 0, n) {
-                    (true, 2 | 3) => age.saturating_add(1),
-                    (false, 3) => 1,
-                    _ => 0,
-                };
-            }
-        }
-        self.age = next;
-    }
-
-    pub fn alive(&self) -> usize {
-        self.age.iter().filter(|a| **a > 0).count()
-    }
-}
-
-/// Young cells glow in `fresh`, settling to `settled` as they age.
-pub struct LifeView<'a> {
-    pub life: &'a Life,
-    pub fresh: Color,
-    pub settled: Color,
-    pub background: Color,
-}
-
-impl Widget for LifeView<'_> {
-    fn render(self, area: Rect, buf: &mut Buffer) {
-        let color = |age: u8| match age {
-            0 => self.background,
-            1..=2 => self.fresh,
-            _ => self.settled,
-        };
-        let l = self.life;
-        let area = area.intersection(buf.area);
-        for row in 0..(area.height as usize).min(l.height / 2) {
-            for col in 0..(area.width as usize).min(l.width) {
-                let top = l.age[row * 2 * l.width + col];
-                let bottom = l.age[(row * 2 + 1) * l.width + col];
-                buf[(area.x + col as u16, area.y + row as u16)]
-                    .set_symbol("▀")
-                    .set_fg(color(top))
-                    .set_bg(color(bottom));
-            }
-        }
-    }
 }
 
 /// HSV (hue in degrees) to a Ratatui RGB color.

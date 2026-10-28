@@ -52,14 +52,13 @@ const PAGE_CONTACT: usize = 5;
 const PAGE_DEBUG: usize = 6;
 // Full-screen demo scenes, not in the tab bar.
 const PAGE_BILLBOARD: usize = 7;
-const PAGE_LIFE: usize = 8;
-const PAGE_PLASMA: usize = 9;
-const PAGE_RAIN: usize = 10;
-const PAGE_WARP: usize = 11;
-const SCENE_NAMES: [&str; 5] = ["billboard", "life", "plasma", "rain", "warp"];
+const PAGE_PLASMA: usize = 8;
+const PAGE_RAIN: usize = 9;
+const PAGE_WARP: usize = 10;
+const SCENE_NAMES: [&str; 4] = ["billboard", "plasma", "rain", "warp"];
 
-const MARQUEE: &str = "ratatui.rs ~ github.com/ratatui/ratatui ~ ";
-const FIRE_ROWS: usize = 18;
+/// Fire pixels are half a cell; this fills the screen from under the wordmark to the banner.
+const FIRE_ROWS: usize = 34;
 
 // Reading a badge you tilt it toward you, so "level" defaults to ~15 degrees off flat:
 // sin(15) = 0.26 g toward the bottom of the screen.
@@ -71,7 +70,7 @@ const MAZE_ROWS: usize = 8;
 const DEMO_HOLD_MS: u32 = 1000;
 /// After starting, inputs are ignored this long and until every button is released.
 const DEMO_GUARD_MS: u32 = 1500;
-const DEMO: [(usize, usize, u32); 11] = [
+const DEMO: [(usize, usize, u32); 10] = [
     (PAGE_BILLBOARD, 0, 12000),
     (PAGE_HERO, 0, 9000),
     (PAGE_LIVE, 0, 7000),
@@ -80,16 +79,14 @@ const DEMO: [(usize, usize, u32); 11] = [
     (PAGE_WIDGETS, 1, 4000),
     (PAGE_WIDGETS, 2, 4000),
     (PAGE_WIDGETS, 3, 9000),
-    (PAGE_LIFE, 0, 12000),
     (PAGE_GET, 0, 6000),
     (PAGE_GET, 1, 6000),
 ];
 /// With no input for this long, the badge drifts into ambient mode: just the scenes.
 const IDLE_MS: u32 = 30_000;
-const AMBIENT: [(usize, usize, u32); 5] = [
+const AMBIENT: [(usize, usize, u32); 4] = [
     (PAGE_BILLBOARD, 0, 8000),
     (PAGE_PLASMA, 0, 8000),
-    (PAGE_LIFE, 0, 10000),
     (PAGE_RAIN, 0, 8000),
     (PAGE_WARP, 0, 8000),
 ];
@@ -252,7 +249,6 @@ pub struct App {
     demo_guard: bool,
     rng: visuals::Rng,
     fire: visuals::Fire,
-    life: visuals::Life,
     rain: visuals::Rain,
     warp: visuals::Warp,
     led_flash_ms: Option<u32>,
@@ -308,7 +304,6 @@ impl App {
             demo_guard: false,
             rng: visuals::Rng(0x1234_5678),
             fire: visuals::Fire::new(53, FIRE_ROWS),
-            life: visuals::Life::new(53, 46),
             rain: visuals::Rain::new(53, 24, &mut visuals::Rng(0x9e37_79b9)),
             warp: visuals::Warp::new(90, &mut visuals::Rng(0x85eb_ca6b)),
             led_flash_ms: None,
@@ -428,9 +423,6 @@ impl App {
     fn goto(&mut self, page: usize) {
         if page == PAGE_MAZE && self.page != PAGE_MAZE {
             self.maze_started_ms = self.now_ms;
-        }
-        if page == PAGE_LIFE {
-            self.life.seed(&mut self.rng);
         }
         self.page = page;
         let name = PAGES.get(page).copied().unwrap_or_else(|| SCENE_NAMES[page - PAGE_BILLBOARD]);
@@ -653,12 +645,6 @@ impl App {
             let swell = visuals::wave(self.now_ms / 40) as f32 / 128.0;
             self.warp.step((0.012 + swell * 0.006) * dt_ms as f32 / 33.0, &mut self.rng);
         }
-        if self.page == PAGE_LIFE && self.now_ms / 120 != (self.now_ms - dt_ms) / 120 {
-            self.life.step();
-            if self.life.alive() < 40 {
-                self.life.seed(&mut self.rng);
-            }
-        }
         if self.page == PAGE_HERO && self.now_ms / 6000 != (self.now_ms - dt_ms) / 6000 {
             let shimmer = fx::sweep_in(Motion::LeftToRight, 12, 0, BG, (900, Interpolation::QuadOut));
             self.fx.add_unique_effect(3, shimmer.with_area(wordmark_area(19)));
@@ -700,7 +686,6 @@ impl App {
         if self.page >= PAGE_BILLBOARD {
             match self.page {
                 PAGE_BILLBOARD => self.draw_billboard(f),
-                PAGE_LIFE => self.draw_life(f),
                 PAGE_PLASMA => self.draw_plasma(f),
                 PAGE_RAIN => self.draw_rain(f),
                 _ => self.draw_warp(f),
@@ -916,56 +901,46 @@ impl App {
 
     fn draw_billboard(&mut self, f: &mut Frame) {
         let area = f.area();
-        let hue = self.now_ms / 20;
+        let fire_rows = (FIRE_ROWS / 2) as u16;
+        f.render_widget(&self.fire, Rect::new(0, area.height - 1 - fire_rows, area.width, fire_rows));
         f.render_widget(
             visuals::BigWordmark { letters: Color::Rgb(255, 255, 255), shadow: wordmark::SHADOW },
             Rect::new(0, 1, area.width, visuals::BigWordmark::HEIGHT),
         );
-        let offset = (self.now_ms / 45) as usize;
-        visuals::marquee(f.buffer_mut(), Rect::new(0, 7, area.width, 8), MARQUEE, offset, |x| {
-            visuals::hsv(hue + x as u32 * 4, 160, 255)
-        });
-        let fire_rows = (FIRE_ROWS / 2) as u16;
-        f.render_widget(&self.fire, Rect::new(0, area.height - fire_rows, area.width, fire_rows));
     }
 
-    fn draw_life(&mut self, f: &mut Frame) {
-        let area = f.area();
-        let accent = self.accent();
-        f.render_widget(
-            visuals::LifeView { life: &self.life, fresh: Color::Rgb(255, 255, 255), settled: accent, background: BG },
-            Rect::new(0, 0, area.width, 23),
-        );
-    }
-
-    /// Every scene's bottom row: who's wearing the badge, and what it's built with.
+    /// Every scene's bottom row: who's wearing the badge.
     fn draw_scene_banner(&mut self, f: &mut Frame) {
         let area = f.area();
         let row = Rect::new(0, area.height - 1, area.width, 1);
         let who = Line::from(vec![
-            Span::styled(format!(" {} ", config::NAME), Style::new().fg(TEXT).bold()),
+            Span::styled(config::NAME, Style::new().fg(TEXT).bold()),
+            Span::raw("  "),
             Span::styled(config::HANDLE, Style::new().fg(self.accent())),
         ]);
-        let ratatui = Line::from(vec![
-            Span::styled("built with ", Style::new().fg(DIM)),
-            Span::styled("Ratatui ", Style::new().fg(self.accent()).bold()),
-        ]);
         f.render_widget(ratatui::widgets::Clear, row);
-        f.render_widget(Block::new().style(Style::new().bg(BG)), row);
-        f.render_widget(Paragraph::new(who), row);
-        f.render_widget(Paragraph::new(ratatui).right_aligned(), row);
+        f.render_widget(Paragraph::new(who).centered().bg(BG), row);
+    }
+
+    /// The pixel wordmark on a plain panel, centered on `y`.
+    fn wordmark_panel(&self, f: &mut Frame, y: u16) {
+        let (w, h) = wordmark::Wordmark::SIZE;
+        let panel = Rect::new((53 - w) / 2 - 2, y - h / 2 - 1, w + 4, h + 2);
+        f.render_widget(ratatui::widgets::Clear, panel);
+        f.render_widget(Block::new().bg(BG), panel);
+        f.render_widget(self.wordmark(), Rect::new(panel.x + 2, panel.y + 1, w, h));
     }
 
     fn draw_plasma(&mut self, f: &mut Frame) {
         let area = f.area();
         f.render_widget(&visuals::Plasma { t: self.now_ms / 12 }, area);
-        let big = BigText::builder()
-            .pixel_size(PixelSize::Quadrant)
-            .style(Style::new().fg(Color::Rgb(255, 255, 255)))
-            .lines(vec!["ratatui".into()])
-            .centered()
-            .build();
-        f.render_widget(big, Rect::new(0, area.height / 2 - 2, area.width, 4));
+        let band = Rect::new(0, area.height / 2 - 4, area.width, visuals::BigWordmark::HEIGHT + 2);
+        f.render_widget(ratatui::widgets::Clear, band);
+        f.render_widget(Block::new().bg(BG), band);
+        f.render_widget(
+            visuals::BigWordmark { letters: Color::Rgb(255, 255, 255), shadow: wordmark::SHADOW },
+            Rect::new(0, band.y + 1, area.width, visuals::BigWordmark::HEIGHT),
+        );
     }
 
     fn draw_rain(&mut self, f: &mut Frame) {
@@ -975,10 +950,7 @@ impl App {
             _ => (80, 240, 200),
         };
         f.render_widget(visuals::RainView { rain: &self.rain, head: Color::Rgb(255, 255, 255), trail }, area);
-        let msg = " ratatui.rs ";
-        let x = (area.width - msg.len() as u16) / 2;
-        let style = Style::new().fg(BG).bg(self.accent()).bold();
-        f.render_widget(Paragraph::new(msg).style(style), Rect::new(x, area.height / 2, msg.len() as u16, 1));
+        self.wordmark_panel(f, area.height / 2);
     }
 
     fn draw_warp(&mut self, f: &mut Frame) {
@@ -991,7 +963,6 @@ impl App {
             layers[depth].push((x1 - tx, y1 - ty, x2 - tx, y2 - ty));
         });
         let colors = [DIM, Color::Rgb(170, 180, 220), Color::Rgb(255, 255, 255)];
-        let accent = self.accent();
         f.render_widget(
             Canvas::default()
                 .marker(Marker::Braille)
@@ -1005,10 +976,13 @@ impl App {
                         }
                         ctx.layer();
                     }
-                    ctx.print(-4.0, 0.0, Span::styled("ratatui", Style::new().fg(accent).bold()));
                 }),
             area,
         );
+        // The mascot rides the warp, drifting with the tilt.
+        let (dx, dy) = ((self.tilt.0 * 3.0) as i16, (self.tilt.1 * 2.0) as i16);
+        let mascot = Rect::new(((53 - 32) / 2 + dx) as u16, (3 + dy) as u16, 32, 16);
+        f.render_widget(RatatuiMascot::new(), mascot);
     }
 
     fn draw_maze(&mut self, f: &mut Frame, body: Rect) {
