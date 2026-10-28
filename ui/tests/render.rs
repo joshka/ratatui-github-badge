@@ -83,6 +83,12 @@ fn demo_starts_on_held_select_cycles_pages_and_first_press_only_wakes() {
         app.update(100, held);
     }
     assert!(app.demo());
+    // Still holding, then a bounce right after release: neither ends the demo.
+    app.update(100, held);
+    app.key(Key::Select);
+    app.update(100, sensors());
+    app.key(Key::Select);
+    assert!(app.demo(), "the starting press must not end the demo");
     let mut seen = std::collections::BTreeSet::new();
     for _ in 0..(80_000 / 50) {
         app.update(50, sensors());
@@ -101,7 +107,9 @@ fn demo_starts_on_held_select_cycles_pages_and_first_press_only_wakes() {
 fn touch_wakes_demo() {
     let mut app = App::new();
     app.start_demo();
-    app.update(100, sensors());
+    for _ in 0..20 {
+        app.update(100, sensors());
+    }
     assert!(app.demo());
     let mut s = sensors();
     s.touch = 0b1;

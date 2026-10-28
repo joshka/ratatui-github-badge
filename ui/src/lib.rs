@@ -65,6 +65,8 @@ const MAZE_ROWS: usize = 8;
 
 /// Holding Select this long starts the booth demo. Its script is (page, widgets tab, ms).
 const DEMO_HOLD_MS: u32 = 1000;
+/// After starting, inputs are ignored this long and until every button is released.
+const DEMO_GUARD_MS: u32 = 1500;
 const DEMO: [(usize, usize, u32); 11] = [
     (PAGE_BILLBOARD, 0, 12000),
     (PAGE_HERO, 0, 9000),
@@ -190,6 +192,8 @@ pub struct App {
     demo_step: usize,
     demo_step_ms: u32,
     select_held_ms: u32,
+    demo_started_ms: u32,
+    demo_guard: bool,
     rng: visuals::Rng,
     fire: visuals::Fire,
     life: visuals::Life,
@@ -240,6 +244,8 @@ impl App {
             demo_step: 0,
             demo_step_ms: 0,
             select_held_ms: 0,
+            demo_started_ms: 0,
+            demo_guard: false,
             rng: visuals::Rng(0x1234_5678),
             fire: visuals::Fire::new(53, FIRE_ROWS),
             life: visuals::Life::new(53, 46),
@@ -319,6 +325,10 @@ impl App {
     fn wake(&mut self) -> bool {
         if !self.demo {
             return false;
+        }
+        // The hold that started the demo (and any bounce on release) mustn't end it.
+        if self.demo_guard {
+            return true;
         }
         self.demo = false;
         self.log.push("demo off".into());
@@ -451,6 +461,8 @@ impl App {
             return;
         }
         self.demo = true;
+        self.demo_started_ms = self.now_ms;
+        self.demo_guard = true;
         self.log.push("demo on".into());
         self.demo_step = DEMO.len() - 1;
         self.demo_step_ms = u32::MAX;
@@ -470,6 +482,12 @@ impl App {
         }
         if !self.demo {
             return;
+        }
+        if self.demo_guard
+            && self.sensors.buttons == 0
+            && self.now_ms.wrapping_sub(self.demo_started_ms) >= DEMO_GUARD_MS
+        {
+            self.demo_guard = false;
         }
         self.demo_step_ms = self.demo_step_ms.saturating_add(dt_ms);
         let (_, _, duration) = DEMO[self.demo_step];
