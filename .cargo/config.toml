@@ -4,3 +4,9 @@ runner = "picotool load -u -v -x -f -t elf"
 
 [build]
 target = "thumbv8m.main-none-eabihf"
+
+[alias]
+# Host-side tools; --target overrides the default thumbv8m target above.
+badge = "run --quiet --release --manifest-path host/Cargo.toml --target host-tuple --"
+preview = "run --quiet --package badge-ui --example preview --target host-tuple --"
+test-ui = "test --package badge-ui --target host-tuple"
