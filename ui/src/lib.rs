@@ -705,6 +705,7 @@ impl App {
                 PAGE_RAIN => self.draw_rain(f),
                 _ => self.draw_warp(f),
             }
+            self.draw_scene_banner(f);
             let dt = Duration::from_millis(self.dt_ms);
             self.fx.process_effects(dt, f.buffer_mut(), area);
             return;
@@ -935,10 +936,24 @@ impl App {
             visuals::LifeView { life: &self.life, fresh: Color::Rgb(255, 255, 255), settled: accent, background: BG },
             Rect::new(0, 0, area.width, 23),
         );
-        f.render_widget(
-            Paragraph::new("Conway's Life, seeded with the Ratatui wordmark").centered().style(DIM),
-            Rect::new(0, 23, area.width, 1),
-        );
+    }
+
+    /// Every scene's bottom row: who's wearing the badge, and what it's built with.
+    fn draw_scene_banner(&mut self, f: &mut Frame) {
+        let area = f.area();
+        let row = Rect::new(0, area.height - 1, area.width, 1);
+        let who = Line::from(vec![
+            Span::styled(format!(" {} ", config::NAME), Style::new().fg(TEXT).bold()),
+            Span::styled(config::HANDLE, Style::new().fg(self.accent())),
+        ]);
+        let ratatui = Line::from(vec![
+            Span::styled("built with ", Style::new().fg(DIM)),
+            Span::styled("Ratatui ", Style::new().fg(self.accent()).bold()),
+        ]);
+        f.render_widget(ratatui::widgets::Clear, row);
+        f.render_widget(Block::new().style(Style::new().bg(BG)), row);
+        f.render_widget(Paragraph::new(who), row);
+        f.render_widget(Paragraph::new(ratatui).right_aligned(), row);
     }
 
     fn draw_plasma(&mut self, f: &mut Frame) {
