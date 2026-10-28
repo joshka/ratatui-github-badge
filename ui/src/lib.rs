@@ -6,7 +6,11 @@
 
 extern crate alloc;
 
+pub mod maze;
+pub mod mirror;
 pub mod qr;
+pub mod visuals;
+pub mod wordmark;
 
 use alloc::{format, string::String, vec, vec::Vec};
 
@@ -19,9 +23,9 @@ use ratatui::{
     text::{Line, Span},
     widgets::{
         Axis, Bar, BarChart, BarGroup, Block, Chart, Dataset, Gauge, GraphType, LineGauge,
-        MascotEyeColor, Paragraph, RatatuiLogo, RatatuiLogoSize, RatatuiMascot, Row, Sparkline,
+        MascotEyeColor, Paragraph, RatatuiMascot, Row, Sparkline,
         Table, TableState, Tabs, Wrap,
-        canvas::{Canvas, Circle, Line as CanvasLine, Points},
+        canvas::{Canvas, Line as CanvasLine, Points},
     },
 };
 use tachyonfx::{Duration, Effect, EffectManager, Interpolation, Motion, fx};
@@ -37,12 +41,43 @@ const ACCENTS: [Color; 4] = [
     Color::Rgb(255, 210, 100),
 ];
 
-const PAGES: [&str; 6] = ["ratatui", "live", "widgets", "get it", "contact", "debug"];
+const PAGES: [&str; 7] = ["ratatui", "live", "maze", "widgets", "get", "me", "debug"];
 const PAGE_HERO: usize = 0;
 const PAGE_LIVE: usize = 1;
-const PAGE_WIDGETS: usize = 2;
-const PAGE_GET: usize = 3;
-const PAGE_CONTACT: usize = 4;
+const PAGE_MAZE: usize = 2;
+const PAGE_WIDGETS: usize = 3;
+const PAGE_GET: usize = 4;
+const PAGE_CONTACT: usize = 5;
+const PAGE_DEBUG: usize = 6;
+// Full-screen demo scenes, not in the tab bar.
+const PAGE_BILLBOARD: usize = 7;
+const PAGE_LIFE: usize = 8;
+const SCENE_NAMES: [&str; 2] = ["billboard", "life"];
+
+const MARQUEE: &str = "ratatui.rs ~ github.com/ratatui/ratatui ~ ";
+const FIRE_ROWS: usize = 18;
+
+// Reading a badge you tilt it toward you, so "level" defaults to ~15 degrees off flat:
+// sin(15) = 0.26 g toward the bottom of the screen.
+const MAZE_NEUTRAL: (f32, f32) = (0.0, 0.26);
+const MAZE_COLS: usize = 10;
+const MAZE_ROWS: usize = 8;
+
+/// Holding Select this long starts the booth demo. Its script is (page, widgets tab, ms).
+const DEMO_HOLD_MS: u32 = 1000;
+const DEMO: [(usize, usize, u32); 11] = [
+    (PAGE_BILLBOARD, 0, 12000),
+    (PAGE_HERO, 0, 9000),
+    (PAGE_LIVE, 0, 7000),
+    (PAGE_MAZE, 0, 14000),
+    (PAGE_WIDGETS, 0, 5000),
+    (PAGE_WIDGETS, 1, 4000),
+    (PAGE_WIDGETS, 2, 4000),
+    (PAGE_WIDGETS, 3, 9000),
+    (PAGE_LIFE, 0, 12000),
+    (PAGE_GET, 0, 6000),
+    (PAGE_GET, 1, 6000),
+];
 
 const MOODS: [&str; 4] = [
     "Ask me about Ratatui",
@@ -145,6 +180,21 @@ pub struct App {
     flip_since: Option<u32>,
     eye_red_until: u32,
     stack: TableState,
+    maze: maze::Maze,
+    maze_seed: u32,
+    maze_neutral: (f32, f32),
+    maze_started_ms: u32,
+    maze_last_ms: Option<u32>,
+    maze_best_ms: Option<u32>,
+    demo: bool,
+    demo_step: usize,
+    demo_step_ms: u32,
+    select_held_ms: u32,
+    rng: visuals::Rng,
+    fire: visuals::Fire,
+    life: visuals::Life,
+    led_flash_ms: Option<u32>,
+    log: Vec<String>,
     fx: EffectManager<u8>,
     clear: bool,
     pub images: Vec<(Image, Rect)>,
@@ -180,6 +230,21 @@ impl App {
             flip_since: None,
             eye_red_until: 0,
             stack: TableState::default().with_selected(Some(0)),
+            maze: maze::Maze::new(MAZE_COLS, MAZE_ROWS, 1),
+            maze_seed: 1,
+            maze_neutral: MAZE_NEUTRAL,
+            maze_started_ms: 0,
+            maze_last_ms: None,
+            maze_best_ms: None,
+            demo: false,
+            demo_step: 0,
+            demo_step_ms: 0,
+            select_held_ms: 0,
+            rng: visuals::Rng(0x1234_5678),
+            fire: visuals::Fire::new(53, FIRE_ROWS),
+            life: visuals::Life::new(53, 46),
+            led_flash_ms: None,
+            log: Vec::new(),
             fx: EffectManager::default(),
             clear: true,
             images: Vec::new(),
@@ -198,12 +263,78 @@ impl App {
         core::mem::take(&mut self.clear)
     }
 
+    /// Jump straight to a page or demo scene (for previews).
+    #[doc(hidden)]
+    pub fn goto_page(&mut self, page: usize) {
+        self.goto(page);
+    }
+
+    pub fn show_debug(&mut self) {
+        self.goto(PAGE_DEBUG);
+    }
+
+    pub fn demo(&self) -> bool {
+        self.demo
+    }
+
+    /// Events since the last call, for the USB log.
+    pub fn take_log(&mut self) -> Vec<String> {
+        core::mem::take(&mut self.log)
+    }
+
+    fn flash_leds(&mut self) {
+        self.led_flash_ms = Some(self.now_ms);
+    }
+
+    /// Case LED brightness (linear 0-255), front-left to front-right.
+    pub fn leds(&self) -> [u8; 4] {
+        let t = self.now_ms;
+        let tri = |period: u32, phase: u32| {
+            let p = (t + phase) % period;
+            let half = period / 2;
+            (if p < half { p } else { period - p }) * 255 / half
+        };
+        let mut out = if self.demo {
+            // A chase that sweeps across the four LEDs, over a slow breathe.
+            let lead = (t / 140) % 6;
+            let lead = if lead < 4 { lead } else { 6 - lead };
+            core::array::from_fn(|i| if i as u32 == lead { 255 } else { 20 + tri(2000, 0) / 6 })
+        } else {
+            core::array::from_fn(|i| (12 + tri(3200, i as u32 * 400) / 5) as u8 as u32)
+        };
+        if self.page == PAGE_BILLBOARD {
+            out = core::array::from_fn(|i| 80 + tri(600, i as u32 * 150) * 2 / 3);
+        }
+        if let Some(start) = self.led_flash_ms {
+            let age = t.wrapping_sub(start);
+            if age < 500 {
+                let boost = 255 * (500 - age) / 500;
+                out = out.map(|v| v.max(boost));
+            }
+        }
+        out.map(|v| v.min(255) as u8)
+    }
+
+    /// The first input during the demo only ends it.
+    fn wake(&mut self) -> bool {
+        if !self.demo {
+            return false;
+        }
+        self.demo = false;
+        self.log.push("demo off".into());
+        self.goto(PAGE_HERO);
+        true
+    }
+
     fn accent(&self) -> Color {
         ACCENTS[self.accent]
     }
 
     /// A physical button was pressed; directions follow the screen when flipped.
     pub fn key(&mut self, key: Key) {
+        if self.wake() {
+            return;
+        }
         let key = if self.flipped { key.rotated() } else { key };
         if let Some(i) = Key::ALL.iter().position(|k| *k == key) {
             self.key_counts[i] += 1;
@@ -217,7 +348,15 @@ impl App {
     }
 
     fn goto(&mut self, page: usize) {
+        if page == PAGE_MAZE && self.page != PAGE_MAZE {
+            self.maze_started_ms = self.now_ms;
+        }
+        if page == PAGE_LIFE {
+            self.life.seed(&mut self.rng);
+        }
         self.page = page;
+        let name = PAGES.get(page).copied().unwrap_or_else(|| SCENE_NAMES[page - PAGE_BILLBOARD]);
+        self.log.push(format!("page {name}"));
         self.clear = true;
         let effect = fx::coalesce((350, Interpolation::QuadOut)).with_area(content_area());
         self.fx.add_unique_effect(0, effect);
@@ -235,6 +374,8 @@ impl App {
                 self.fx.add_unique_effect(1, effect.with_area(area));
             }
             PAGE_LIVE => self.accent = step(self.accent, ACCENTS.len()),
+            PAGE_MAZE if forward => self.maze_neutral = MAZE_NEUTRAL,
+            PAGE_MAZE => self.maze_neutral = self.screen_gravity(),
             PAGE_GET => self.qr = step(self.qr, 2),
             PAGE_CONTACT => self.contact = step(self.contact, CONTACT_LABELS.len()),
             _ => {}
@@ -242,6 +383,7 @@ impl App {
     }
 
     fn select(&mut self) {
+        self.flash_leds();
         match self.page {
             PAGE_HERO => {
                 self.eye_red_until = self.now_ms + 700;
@@ -257,10 +399,106 @@ impl App {
             PAGE_WIDGETS => {
                 self.sub = 3;
             }
+            PAGE_MAZE => self.new_maze(),
             _ => {
                 let effect = fx::sweep_in(Motion::LeftToRight, 12, 0, BG, (450, Interpolation::QuadOut));
                 self.fx.add_unique_effect(1, effect.with_area(content_area()));
             }
+        }
+    }
+
+    fn new_maze(&mut self) {
+        self.maze_seed = self.maze_seed.wrapping_mul(1_103_515_245).wrapping_add(12_345) | 1;
+        self.maze = maze::Maze::new(MAZE_COLS, MAZE_ROWS, self.maze_seed);
+        self.maze_started_ms = self.now_ms;
+        let effect = fx::coalesce((500, Interpolation::QuadOut)).with_area(content_area());
+        self.fx.add_unique_effect(1, effect);
+    }
+
+    /// Gravity in screen axes (+x right, +y down), following the rotation.
+    fn screen_gravity(&self) -> (f32, f32) {
+        let [ax, ay, _] = self.sensors.accel;
+        let sign = if self.flipped { -1.0 } else { 1.0 };
+        (ax * sign, ay * sign)
+    }
+
+    fn update_maze(&mut self, dt_ms: u32) {
+        if self.demo {
+            self.maze.autopilot(dt_ms);
+        } else {
+            let (gx, gy) = self.screen_gravity();
+            let tilt = (gx - self.maze_neutral.0, gy - self.maze_neutral.1);
+            self.maze.roll(tilt, dt_ms);
+        }
+        if self.maze.solved() {
+            let time = self.now_ms.wrapping_sub(self.maze_started_ms);
+            self.flash_leds();
+            self.log.push(format!("maze solved in {}.{}s{}", time / 1000, time % 1000 / 100, if self.demo { " (autopilot)" } else { "" }));
+            if !self.demo {
+                self.maze_last_ms = Some(time);
+                self.maze_best_ms = Some(self.maze_best_ms.map_or(time, |b| b.min(time)));
+            }
+            self.new_maze();
+            let boom = fx::explode(10.0, 3.0, (700, Interpolation::QuadOut));
+            let effect = fx::sequence(&[boom, fx::coalesce((500, Interpolation::QuadOut))]);
+            self.fx.add_unique_effect(1, effect.with_area(content_area()));
+        }
+    }
+
+    /// Start the booth demo (hold Select, or the USB `demo` command).
+    pub fn start_demo(&mut self) {
+        if self.demo {
+            return;
+        }
+        self.demo = true;
+        self.log.push("demo on".into());
+        self.demo_step = DEMO.len() - 1;
+        self.demo_step_ms = u32::MAX;
+        self.flash_leds();
+    }
+
+    fn update_demo(&mut self, dt_ms: u32) {
+        // Physical Select is bit 4 of `buttons`, in `Key::ALL` order.
+        if self.sensors.buttons & 0b10000 != 0 && self.sensors.buttons & 0b00100 == 0 {
+            self.select_held_ms = self.select_held_ms.saturating_add(dt_ms);
+            if self.select_held_ms >= DEMO_HOLD_MS && !self.demo {
+                self.select_held_ms = 0;
+                self.start_demo();
+            }
+        } else {
+            self.select_held_ms = 0;
+        }
+        if !self.demo {
+            return;
+        }
+        self.demo_step_ms = self.demo_step_ms.saturating_add(dt_ms);
+        let (_, _, duration) = DEMO[self.demo_step];
+        if self.demo_step_ms >= duration {
+            self.demo_step = (self.demo_step + 1) % DEMO.len();
+            self.demo_step_ms = 0;
+            let (page, sub, _) = DEMO[self.demo_step];
+            if page == PAGE_GET {
+                self.qr = sub;
+            }
+            if page != self.page {
+                self.goto(page);
+            }
+            if page == PAGE_WIDGETS && sub != self.sub {
+                self.sub = sub;
+                let effect = fx::slide_in(Motion::RightToLeft, 8, 0, BG, (300, Interpolation::QuadOut));
+                self.fx.add_unique_effect(1, effect.with_area(widgets_body()));
+            }
+            self.accent = (self.accent + 1) % ACCENTS.len();
+        }
+        // Keep the effects page busy and the mascot lively.
+        let tick = |period| self.demo_step_ms / period != self.demo_step_ms.saturating_sub(dt_ms) / period;
+        if self.page == PAGE_WIDGETS && self.sub == 3 && tick(1800) {
+            let effect = effect_named(self.effect).with_area(widgets_body());
+            self.fx.add_unique_effect(1, effect);
+            self.effect = (self.effect + 1) % EFFECTS.len();
+        }
+        if self.page == PAGE_HERO && tick(3000) {
+            self.select();
         }
     }
 
@@ -289,13 +527,30 @@ impl App {
                 *count += 1;
             }
         }
-        if new_touches != 0 && self.page == PAGE_HERO {
+        if new_touches != 0 && !self.wake() && self.page == PAGE_HERO {
             self.eye_red_until = self.now_ms + 300;
         }
 
         if sensors.imu_ok {
             self.update_orientation(sensors.accel[FLIP_AXIS] * FLIP_SIGN);
         }
+        if self.page == PAGE_MAZE {
+            self.update_maze(dt_ms);
+        }
+        if self.page == PAGE_BILLBOARD {
+            self.fire.step(&mut self.rng);
+        }
+        if self.page == PAGE_LIFE && self.now_ms / 120 != (self.now_ms - dt_ms) / 120 {
+            self.life.step();
+            if self.life.alive() < 40 {
+                self.life.seed(&mut self.rng);
+            }
+        }
+        if self.page == PAGE_HERO && self.now_ms / 6000 != (self.now_ms - dt_ms) / 6000 {
+            let shimmer = fx::sweep_in(Motion::LeftToRight, 12, 0, BG, (900, Interpolation::QuadOut));
+            self.fx.add_unique_effect(3, shimmer.with_area(wordmark_area(19)));
+        }
+        self.update_demo(dt_ms);
         if self.now_ms / 1500 != (self.now_ms - dt_ms) / 1500 {
             self.stack.select_next();
             if self.stack.selected() >= Some(STACK.len()) {
@@ -314,6 +569,11 @@ impl App {
         if self.now_ms.wrapping_sub(since) >= FLIP_HOLD_MS {
             self.flipped = wants_flip;
             self.flip_since = None;
+            self.log.push(format!("flipped {wants_flip}"));
+            self.flash_leds();
+            if wants_flip {
+                self.wake();
+            }
             self.clear = true;
             let effect = fx::sweep_in(Motion::UpToDown, 10, 0, BG, (400, Interpolation::QuadOut));
             self.fx.add_unique_effect(0, effect);
@@ -324,6 +584,16 @@ impl App {
         self.images.clear();
         let area = f.area();
         f.render_widget(Block::new().style(Style::new().bg(BG).fg(TEXT)), area);
+        if self.page >= PAGE_BILLBOARD {
+            if self.page == PAGE_BILLBOARD {
+                self.draw_billboard(f);
+            } else {
+                self.draw_life(f);
+            }
+            let dt = Duration::from_millis(self.dt_ms);
+            self.fx.process_effects(dt, f.buffer_mut(), area);
+            return;
+        }
         let [top, body, footer] =
             Layout::vertical([Constraint::Length(1), Constraint::Fill(1), Constraint::Length(1)]).areas(area);
         f.render_widget(
@@ -337,19 +607,21 @@ impl App {
         match self.page {
             PAGE_HERO => self.draw_hero(f, body),
             PAGE_LIVE => self.draw_live(f, body),
+            PAGE_MAZE => self.draw_maze(f, body),
             PAGE_WIDGETS => self.draw_widgets(f, body),
             PAGE_GET => self.draw_get(f, body),
             PAGE_CONTACT => self.draw_contact(f, body),
             _ => self.draw_debug(f, body),
         }
-        let hints = match self.page {
-            PAGE_HERO => "◄► page  ▲▼ status  ● poke",
+        let hints = if self.demo { "demo · press any button" } else { match self.page {
+            PAGE_HERO => "◄► page ▲▼ status hold● demo",
             PAGE_LIVE => "tilt me · touch the pads",
             PAGE_WIDGETS => "▲▼ tab  ● play effect",
+            PAGE_MAZE => "▲ level here ▼ reset ● new",
             PAGE_GET => "▲▼ switch link",
             PAGE_CONTACT => "▲▼ choose · scan",
             _ => "hold ◄+● for bootloader",
-        };
+        } };
         let [left, right] = Layout::horizontal([Constraint::Fill(1), Constraint::Length(11)]).areas(footer);
         f.render_widget(Paragraph::new(hints).style(DIM), left);
         f.render_widget(Paragraph::new("ratatui.rs").style(self.accent()).right_aligned(), right);
@@ -397,9 +669,10 @@ impl App {
         f.render_widget(RatatuiMascot::new().set_eye(eye), mascot_area(dx, dy));
 
         let panel = Rect::new(36, body.y, 17, 17);
-        let logo = Rect::new(37, 1, 15, 2);
-        f.render_widget(RatatuiLogo::new(RatatuiLogoSize::Tiny), logo);
-        f.buffer_mut().set_style(logo, self.accent());
+        f.render_widget(
+            Paragraph::new("@ferris").centered().style(Style::new().fg(self.accent()).bold()),
+            Rect::new(panel.x, 2, panel.width, 1),
+        );
         let avatar = Rect::new(37, 4, 15, 9);
         mark_image(f, avatar);
         self.images.push((Image::Avatar, avatar));
@@ -415,15 +688,7 @@ impl App {
             Rect::new(panel.x, 13, panel.width, 5),
         );
 
-        f.render_widget(
-            BigText::builder()
-                .pixel_size(PixelSize::Quadrant)
-                .style(Style::new().fg(self.accent()))
-                .lines(vec!["@ferris".into()])
-                .alignment(Alignment::Center)
-                .build(),
-            Rect::new(0, 18, body.width, 4),
-        );
+        f.render_widget(self.wordmark(), wordmark_area(19));
         f.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled("ratatui.rs", Style::new().fg(self.accent()).bold()),
@@ -433,6 +698,10 @@ impl App {
             .centered(),
             Rect::new(0, 22, body.width, 1),
         );
+    }
+
+    fn wordmark(&self) -> wordmark::Wordmark {
+        wordmark::Wordmark { letters: Color::Rgb(255, 255, 255), shadow: wordmark::SHADOW }
     }
 
     fn draw_live(&mut self, f: &mut Frame, body: Rect) {
@@ -473,11 +742,11 @@ impl App {
                 .x_bounds([-1.2, 1.2])
                 .y_bounds([-1.2, 1.2])
                 .paint(move |ctx| {
-                    ctx.draw(&Circle { x: 0.0, y: 0.0, radius: 1.0, color: DIM });
+                    ctx.draw(&Points { coords: &ring(0.0, 0.0, 1.0, 72), color: DIM });
                     ctx.draw(&CanvasLine::new(-1.0, 0.0, 1.0, 0.0, DIM));
                     ctx.draw(&CanvasLine::new(0.0, -1.0, 0.0, 1.0, DIM));
-                    ctx.draw(&Circle { x: bx, y: by, radius: 0.18, color: accent });
-                    ctx.draw(&Circle { x: bx, y: by, radius: 0.08, color: accent });
+                    ctx.draw(&Points { coords: &ring(bx, by, 0.18, 20), color: accent });
+                    ctx.draw(&Points { coords: &ring(bx, by, 0.08, 10), color: accent });
                 }),
             level_area,
         );
@@ -525,6 +794,63 @@ impl App {
                 .block(Block::bordered().title(" inputs ").border_style(accent)),
             inputs,
         );
+    }
+
+    fn draw_billboard(&mut self, f: &mut Frame) {
+        let area = f.area();
+        let hue = self.now_ms / 20;
+        f.render_widget(
+            visuals::BigWordmark { letters: Color::Rgb(255, 255, 255), shadow: wordmark::SHADOW },
+            Rect::new(0, 1, area.width, visuals::BigWordmark::HEIGHT),
+        );
+        let offset = (self.now_ms / 45) as usize;
+        visuals::marquee(f.buffer_mut(), Rect::new(0, 7, area.width, 8), MARQUEE, offset, |x| {
+            visuals::hsv(hue + x as u32 * 4, 160, 255)
+        });
+        let fire_rows = (FIRE_ROWS / 2) as u16;
+        f.render_widget(&self.fire, Rect::new(0, area.height - fire_rows, area.width, fire_rows));
+    }
+
+    fn draw_life(&mut self, f: &mut Frame) {
+        let area = f.area();
+        let accent = self.accent();
+        f.render_widget(
+            visuals::LifeView { life: &self.life, fresh: Color::Rgb(255, 255, 255), settled: accent, background: BG },
+            Rect::new(0, 0, area.width, 23),
+        );
+        f.render_widget(
+            Paragraph::new("Conway's Life, seeded with the Ratatui wordmark").centered().style(DIM),
+            Rect::new(0, 23, area.width, 1),
+        );
+    }
+
+    fn draw_maze(&mut self, f: &mut Frame, body: Rect) {
+        let accent = self.accent();
+        let (w, h) = self.maze.size();
+        let area = Rect::new((body.width - w) / 2, body.y, w, h);
+        f.render_widget(
+            maze::MazeView {
+                maze: &self.maze,
+                wall: Color::Rgb(70, 80, 130),
+                floor: BG,
+                trail: Color::Rgb(36, 38, 60),
+                ball: accent,
+            },
+            area,
+        );
+        let secs = |ms: u32| format!("{}.{}s", ms / 1000, (ms % 1000) / 100);
+        let elapsed = self.now_ms.wrapping_sub(self.maze_started_ms);
+        let mut spans = vec![Span::styled(format!(" time {} ", secs(elapsed)), Style::new().fg(BG).bg(accent))];
+        if let Some(last) = self.maze_last_ms {
+            spans.push(Span::styled(format!("  last {}", secs(last)), TEXT));
+        }
+        if let Some(best) = self.maze_best_ms {
+            spans.push(Span::styled(format!("  best {}", secs(best)), Color::Rgb(255, 210, 100)));
+        }
+        if self.demo {
+            spans = vec![Span::styled(" autopilot: breadth-first search ", Style::new().fg(BG).bg(accent))];
+        }
+        f.render_widget(Paragraph::new(Line::from(spans)).centered(), Rect::new(0, area.bottom(), body.width, 1));
     }
 
     fn draw_widgets(&mut self, f: &mut Frame, body: Rect) {
@@ -625,15 +951,7 @@ impl App {
 
     fn draw_get(&mut self, f: &mut Frame, body: Rect) {
         let accent = self.accent();
-        f.render_widget(
-            BigText::builder()
-                .pixel_size(PixelSize::Quadrant)
-                .style(Style::new().fg(accent))
-                .lines(vec!["ratatui".into()])
-                .alignment(Alignment::Center)
-                .build(),
-            Rect::new(0, body.y, body.width, 4),
-        );
+        f.render_widget(self.wordmark(), wordmark_area(body.y + 1));
         let code = if self.qr == 0 { &qr::QR_RATATUI_RS } else { &qr::QR_GITHUB };
         let (w, h) = code.size();
         let qr_area = Rect::new(1, body.y + 4 + (18u16.saturating_sub(h)) / 2, w, h);
@@ -686,7 +1004,12 @@ impl App {
         let s = self.sensors;
         let [ax, ay, az] = s.accel;
         let mut lines = vec![
-            Line::from(format!("frame {} ms (flush {} ms)", s.frame_ms, s.flush_ms)),
+            Line::from(format!(
+                "frame {} ms = draw {} + flush {}",
+                s.frame_ms,
+                s.frame_ms.saturating_sub(s.flush_ms),
+                s.flush_ms
+            )),
             Line::from(format!("heap {}K used / {}K free", s.heap_used / 1024, s.heap_free / 1024)),
             Line::from(format!("accel {ax:+.2} {ay:+.2} {az:+.2} g  imu {}", s.imu_ok)),
             Line::from(format!("touch {:08b}  ok {}", s.touch, s.touch_ok)),
@@ -708,6 +1031,23 @@ impl App {
     }
 }
 
+/// Points on a circle by repeated rotation. Ratatui's `Circle` evaluates f64 sin/cos at all
+/// 360 degrees, which this FPU-less-for-f64 chip emulates in software (~25 ms per circle).
+fn ring(x: f64, y: f64, radius: f64, points: usize) -> Vec<(f64, f64)> {
+    // cos/sin of 2*pi/points via a short Taylor series; points >= 8 keeps the error tiny.
+    let a = core::f64::consts::TAU / points as f64;
+    let (a2, a3) = (a * a, a * a * a);
+    let (c, s) = (1.0 - a2 / 2.0 + a2 * a2 / 24.0, a - a3 / 6.0 + a3 * a2 / 120.0);
+    let (mut dx, mut dy) = (radius, 0.0);
+    (0..points)
+        .map(|_| {
+            let p = (x + dx, y + dy);
+            (dx, dy) = (dx * c - dy * s, dx * s + dy * c);
+            p
+        })
+        .collect()
+}
+
 fn wrap100(v: f64) -> f64 {
     let r = v % 100.0;
     if r < 0.0 { r + 100.0 } else { r }
@@ -715,6 +1055,11 @@ fn wrap100(v: f64) -> f64 {
 
 fn round(v: f32) -> i16 {
     if v < 0.0 { (v - 0.5) as i16 } else { (v + 0.5) as i16 }
+}
+
+fn wordmark_area(y: u16) -> Rect {
+    let (w, h) = wordmark::Wordmark::SIZE;
+    Rect::new((53 - w) / 2, y, w, h)
 }
 
 fn content_area() -> Rect {

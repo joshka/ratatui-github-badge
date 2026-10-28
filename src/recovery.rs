@@ -8,6 +8,9 @@ use core::{
 use critical_section::Mutex;
 
 const PANIC_MAGIC: u32 = 0x52415450;
+/// Set while the app runs and cleared before deliberate reboots. Reboots via the boot ROM
+/// (picotool, BOOTSEL) also report a watchdog timer reset, so this tells a real stall apart.
+const ALIVE_MAGIC: u32 = 0x414c_4956;
 const REPORT_SIZE: usize = 256;
 
 #[derive(Clone, Copy)]
@@ -50,18 +53,22 @@ pub fn init() -> bool {
     let report = if watchdog.scratch0().read() == PANIC_MAGIC {
         // Only our panic handler sets this magic, after writing a complete Report.
         Some(unsafe { core::ptr::read_volatile((&raw const PANIC_REPORT).cast::<Report>()) })
-    } else if watchdog.reason().read().timer() {
+    } else if watchdog.reason().read().timer() && watchdog.scratch1().read() == ALIVE_MAGIC {
         let mut report = Report::new();
-        let _ = report.write_str(
-            "Watchdog reset: the main loop stalled for 5 s.",
-        );
+        let _ = report.write_str("Watchdog reset: the main loop stalled for 5 s.");
         Some(report)
     } else {
         None
     };
     watchdog.scratch0().write_value(0);
+    watchdog.scratch1().write_value(ALIVE_MAGIC);
     critical_section::with(|cs| *LAST_REPORT.borrow(cs).borrow_mut() = report);
     report.is_some()
+}
+
+/// Call before rebooting on purpose so the next boot doesn't report a stall.
+pub fn clear_alive() {
+    embassy_rp::pac::WATCHDOG.scratch1().write_value(0);
 }
 
 pub fn report() -> Option<Report> {

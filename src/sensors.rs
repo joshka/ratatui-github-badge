@@ -63,7 +63,9 @@ impl Sensors {
 
     pub fn battery_v(&mut self) -> f32 {
         let raw = self.adc.blocking_read(&mut self.battery).unwrap_or(0);
-        raw as f32 * 3.3 / 4095.0 * 4.0
+        // The schematic notes say 750k/250k (x4), but readings on USB power (~8.4 V at x4)
+        // only make sense at x2, so trust the measurement.
+        raw as f32 * 3.3 / 4095.0 * 2.0
     }
 
     pub fn light(&mut self) -> f32 {

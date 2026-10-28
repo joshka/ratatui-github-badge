@@ -5,9 +5,14 @@ edition = "2024"
 publish = false
 
 [dependencies]
-ratatui = { version = "0.30.2", default-features = false }
+ratatui = { version = "0.30.2", default-features = false, features = ["layout-cache"] }
 tachyonfx = { version = "0.25.2", default-features = false }
 tui-big-text = { version = "0.8.10", default-features = false }
 
 [build-dependencies]
 qrcode = { version = "0.14.1", default-features = false }
+
+[dev-dependencies]
+critical-section = { version = "1.2", features = ["std"] }
+mousefood = { path = "../../mousefood/mousefood", default-features = false, features = ["fonts"] }
+png = "0.17"

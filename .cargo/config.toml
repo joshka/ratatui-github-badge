@@ -1,6 +1,6 @@
 [target.'cfg(all(target_arch = "arm", target_os = "none"))']
-# Badge must be in BOOTSEL mode (hold A+C in this firmware, or USER/boot button + reset).
-runner = "picotool load -u -v -x -t elf"
+# -f asks running badge firmware to reboot into BOOTSEL over USB (fallback: hold Left + Select).
+runner = "picotool load -u -v -x -f -t elf"
 
 [build]
 target = "thumbv8m.main-none-eabihf"

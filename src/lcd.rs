@@ -21,10 +21,10 @@ pub const HEIGHT: usize = 240;
 
 const WR_MASK: u32 = 1 << 30;
 
-// Generous WR timing at the 150 MHz default clock (6.7 ns/cycle). The datasheet asks for
-// >= 15 ns low, >= 15 ns high and a >= 66 ns cycle; this gives ~100 ns per byte.
-const WR_LOW_CYCLES: u32 = 6;
-const WR_HIGH_CYCLES: u32 = 6;
+// WR timing at 200 MHz (5 ns/cycle). The datasheet asks for >= 15 ns low, >= 15 ns high
+// and a >= 66 ns cycle; with loop overhead this stays around 100 ns per byte.
+const WR_LOW_CYCLES: u32 = 8;
+const WR_HIGH_CYCLES: u32 = 8;
 
 #[inline(always)]
 fn delay<const N: u32>() {
@@ -196,6 +196,32 @@ impl DrawTarget for Lcd {
         for y in area.top_left.y..=br.y {
             let row = y as usize * WIDTH;
             self.fb[row + area.top_left.x as usize..=row + br.x as usize].fill(raw);
+        }
+        Ok(())
+    }
+
+    /// Glyphs arrive here; writing rows directly avoids per-pixel bounds checks.
+    fn fill_contiguous<I>(
+        &mut self,
+        area: &embedded_graphics::primitives::Rectangle,
+        colors: I,
+    ) -> Result<(), Self::Error>
+    where
+        I: IntoIterator<Item = Self::Color>,
+    {
+        let clipped = area.intersection(&self.bounding_box());
+        if clipped != *area {
+            return self.draw_iter(area.points().zip(colors).map(|(p, c)| Pixel(p, c)));
+        }
+        let mut colors = colors.into_iter();
+        let (x0, w) = (area.top_left.x as usize, area.size.width as usize);
+        for y in area.top_left.y as usize..area.top_left.y as usize + area.size.height as usize {
+            for px in &mut self.fb[y * WIDTH + x0..y * WIDTH + x0 + w] {
+                match colors.next() {
+                    Some(c) => *px = RawU16::from(c).into_inner(),
+                    None => return Ok(()),
+                }
+            }
         }
         Ok(())
     }

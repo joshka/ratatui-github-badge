@@ -18,7 +18,7 @@ fn every_page_and_subtab_renders() {
     for _ in 0..30 {
         app.update(40, sensors());
     }
-    for page in 0..6 {
+    for page in 0..7 {
         for _ in 0..4 {
             for _ in 0..20 {
                 app.update(40, sensors());
@@ -68,4 +68,43 @@ fn stress_many_frames() {
         }
         render(&mut app);
     }
+}
+
+#[test]
+fn demo_starts_on_held_select_cycles_pages_and_first_press_only_wakes() {
+    let mut app = App::new();
+    for _ in 0..(60_000 / 100) {
+        app.update(100, sensors());
+    }
+    assert!(!app.demo(), "demo must not start by itself");
+    let mut held = sensors();
+    held.buttons = 0b10000;
+    for _ in 0..11 {
+        app.update(100, held);
+    }
+    assert!(app.demo());
+    let mut seen = std::collections::BTreeSet::new();
+    for _ in 0..(80_000 / 50) {
+        app.update(50, sensors());
+        seen.insert(app.page);
+        render(&mut app);
+    }
+    assert!(seen.len() >= 5, "demo visited {seen:?}");
+    app.key(Key::Right);
+    assert!(!app.demo());
+    assert_eq!(app.page, 0, "waking press should not navigate");
+    app.key(Key::Right);
+    assert_eq!(app.page, 1);
+}
+
+#[test]
+fn touch_wakes_demo() {
+    let mut app = App::new();
+    app.start_demo();
+    app.update(100, sensors());
+    assert!(app.demo());
+    let mut s = sensors();
+    s.touch = 0b1;
+    app.update(33, s);
+    assert!(!app.demo());
 }

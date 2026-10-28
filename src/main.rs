@@ -7,12 +7,14 @@
 #![no_main]
 
 mod lcd;
+mod leds;
 mod recovery;
 mod sensors;
+mod usb;
 
 extern crate alloc;
 
-use alloc::{rc::Rc, vec::Vec};
+use alloc::{format, rc::Rc, string::String, vec::Vec};
 use core::{
     cell::{Cell, RefCell},
     mem::MaybeUninit,
@@ -22,8 +24,11 @@ use badge_ui::{App, CELL_PX, Image, Key};
 use embassy_executor::Spawner;
 use embassy_rp::{
     adc::{self, Adc},
+    executor::InterruptExecutor,
+    interrupt::{self, InterruptExt, Priority},
     gpio::{Input, Level, Output, Pull},
     i2c::I2c,
+    pwm::Pwm,
 };
 use embassy_time::{Duration, Instant, Ticker};
 use embedded_alloc::LlffHeap as Heap;
@@ -45,6 +50,13 @@ pub static PICOTOOL_ENTRIES: [embassy_rp::binary_info::EntryAddr; 3] = [
 
 #[global_allocator]
 static HEAP: Heap = Heap::empty();
+
+static USB_EXECUTOR: InterruptExecutor = InterruptExecutor::new();
+
+#[embassy_rp::interrupt]
+unsafe fn SWI_IRQ_1() {
+    unsafe { USB_EXECUTOR.on_interrupt() }
+}
 
 static mut FRAMEBUFFER: [u16; lcd::WIDTH * lcd::HEIGHT] = [0; lcd::WIDTH * lcd::HEIGHT];
 
@@ -68,15 +80,26 @@ struct FlushState {
 )]
 async fn main(_spawner: Spawner) {
     {
-        const HEAP_SIZE: usize = 160 * 1024;
+        const HEAP_SIZE: usize = 184 * 1024;
         static mut HEAP_MEM: [MaybeUninit<u8>; HEAP_SIZE] = [MaybeUninit::uninit(); HEAP_SIZE];
         unsafe { HEAP.init(&raw mut HEAP_MEM as usize, HEAP_SIZE) }
     }
 
-    let p = embassy_rp::init(Default::default());
+    // Pimoroni's firmware runs this chip at 200 MHz; embassy picks the matching core voltage.
+    let mut config = embassy_rp::config::Config::default();
+    config.clocks = embassy_rp::clocks::ClockConfig::system_freq(200_000_000).unwrap();
+    let p = embassy_rp::init(config);
+    // The default 500-entry layout cache outgrows the heap; our pages need a few dozen.
+    ratatui::layout::Layout::init_cache(core::num::NonZeroUsize::new(64).unwrap());
     recovery::init();
     let mut watchdog = embassy_rp::watchdog::Watchdog::new(p.WATCHDOG);
     watchdog.start(Duration::from_secs(5));
+    interrupt::SWI_IRQ_1.set_priority(Priority::P2);
+    usb::start(USB_EXECUTOR.start(interrupt::SWI_IRQ_1), p.USB);
+    let mut leds = leds::Leds::new(
+        Pwm::new_output_ab(p.PWM_SLICE0, p.PIN_0, p.PIN_1, leds::Leds::config()),
+        Pwm::new_output_ab(p.PWM_SLICE1, p.PIN_2, p.PIN_3, leds::Leds::config()),
+    );
 
     let data = [
         Output::new(p.PIN_32, Level::Low),
@@ -121,10 +144,12 @@ async fn main(_spawner: Spawner) {
 
     let shared = Rc::new(RefCell::new(FlushState::default()));
     let flush_ms = Rc::new(Cell::new(0u32));
+    let flush_us = Rc::new(Cell::new(0u64));
     let config = EmbeddedBackendConfig {
         flush_callback: alloc::boxed::Box::new({
             let shared = shared.clone();
             let flush_ms = flush_ms.clone();
+            let flush_us = flush_us.clone();
             move |d: &mut lcd::Lcd| {
                 let start = Instant::now();
                 let state = shared.borrow();
@@ -133,6 +158,7 @@ async fn main(_spawner: Spawner) {
                 }
                 d.flush(state.flipped);
                 flush_ms.set(start.elapsed().as_millis() as u32);
+                flush_us.set(start.elapsed().as_micros());
             }
         }),
         ..Default::default()
@@ -143,13 +169,23 @@ async fn main(_spawner: Spawner) {
     let mut app = App::new();
     if let Some(report) = recovery::report() {
         app.report = Some(report.as_str().into());
-        app.page = 5;
+        app.show_debug();
     }
     let mut previous = 0u8;
     let mut combo_since: Option<Instant> = None;
     let mut last = Instant::now();
     let mut frame_ms = 0u32;
-    let mut ticker = Ticker::every(Duration::from_millis(33));
+    // Most pages now draw in ~20 ms; cap at ~60 fps and let slower pages run back to back.
+    let mut ticker = Ticker::every(Duration::from_millis(16));
+    let mut mirror = false;
+    let mut snapshot = false;
+    let mut frame_count = 0u32;
+    // Only grows when mirroring or taking a snapshot.
+    let mut text = String::new();
+    // Rolling sums for the USB perf log: (render, backend, flush) in microseconds.
+    let mut perf = [0u64; 3];
+    let mut perf_frames = 0u64;
+    let mut perf_since = Instant::now();
 
     loop {
         let start = Instant::now();
@@ -164,13 +200,36 @@ async fn main(_spawner: Spawner) {
         if held & 0b10100 == 0b10100 {
             let since = *combo_since.get_or_insert(start);
             if since.elapsed() > Duration::from_secs(1) {
-                embassy_rp::rom_data::reboot(0x0002 | 0x0100, 10, 0, 0);
+                usb::reboot(0x0002);
             }
         } else {
             combo_since = None;
             for (i, key) in KEYS.iter().enumerate() {
                 if pressed & (1 << i) != 0 {
                     app.key(*key);
+                }
+            }
+        }
+
+        if usb::reboot_requested() {
+            usb::reboot(0x0002);
+        }
+        while let Ok(command) = usb::COMMANDS.try_receive() {
+            match command {
+                usb::Command::Key(key) => app.key(key),
+                usb::Command::Mirror => {
+                    mirror = !mirror;
+                    if !mirror {
+                        text = String::new();
+                    }
+                    terminal.clear().unwrap();
+                    usb::write(if mirror { "\x1b[2J" } else { "\x1b[0m\x1b[2J\x1b[Hmirror off\r\n" });
+                }
+                usb::Command::Screen => snapshot = true,
+                usb::Command::Bootsel => usb::reboot(0x0002),
+                usb::Command::Demo => app.start_demo(),
+                usb::Command::Help => {
+                    usb::write("commands: mirror | screen | demo | key up|down|left|right|select | bootsel\r\n");
                 }
             }
         }
@@ -194,14 +253,50 @@ async fn main(_spawner: Spawner) {
         if app.take_clear() {
             terminal.clear().unwrap();
         }
-        terminal
+        let mut render_us = 0;
+        let draw_start = Instant::now();
+        let completed = terminal
             .draw(|f| {
+                let render_start = Instant::now();
                 app.draw(f);
+                render_us = render_start.elapsed().as_micros();
                 let mut state = shared.borrow_mut();
                 state.flipped = app.flipped();
                 state.images.clone_from(&app.images);
             })
             .unwrap();
+        let draw_us = draw_start.elapsed().as_micros();
+        perf[0] += render_us;
+        perf[1] += draw_us.saturating_sub(render_us + flush_us.get());
+        perf[2] += flush_us.get();
+        perf_frames += 1;
+        frame_count = frame_count.wrapping_add(1);
+        // Mirror every 3rd frame, skipping frames the host hasn't caught up with.
+        if mirror && frame_count % 3 == 0 {
+            badge_ui::mirror::ansi(completed.buffer, &mut text);
+            usb::write(&text);
+        }
+        if core::mem::take(&mut snapshot) {
+            badge_ui::mirror::text(completed.buffer, &mut text);
+            usb::write(&text);
+        }
+        for line in app.take_log() {
+            if !mirror {
+                usb::write(&format!("[{:>7}] {line}\r\n", Instant::now().as_millis()));
+            }
+        }
+        leds.set(app.leds());
+        if perf_since.elapsed() > Duration::from_secs(2) {
+            if !mirror {
+                let [r, b, fl] = perf.map(|v| v / perf_frames / 100);
+                let line = format!(
+                    "perf page {} render {}.{} backend {}.{} flush {}.{} ms heap {}K\r\n",
+                    app.page, r / 10, r % 10, b / 10, b % 10, fl / 10, fl % 10, HEAP.used() / 1024
+                );
+                usb::write(&line);
+            }
+            (perf, perf_frames, perf_since) = ([0; 3], 0, Instant::now());
+        }
 
         frame_ms = start.elapsed().as_millis() as u32;
         watchdog.feed(Duration::from_secs(5));

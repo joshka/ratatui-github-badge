@@ -6,17 +6,21 @@ publish = false
 
 [dependencies]
 embassy-executor = "0.10.0"
-embassy-rp = { version = "0.10.0", features = ["rp235xb", "unstable-pac", "time-driver", "critical-section-impl", "binary-info", "executor-thread"] }
+embassy-rp = { version = "0.10.0", features = ["rp235xb", "unstable-pac", "time-driver", "critical-section-impl", "binary-info", "executor-thread", "executor-interrupt"] }
 embassy-time = "0.5.1"
 cortex-m = { version = "0.7.10", features = ["inline-asm"] }
 cortex-m-rt = "0.7.7"
 embedded-alloc = "0.7.0"
 embedded-graphics = "0.8.2"
 mousefood = { path = "../mousefood/mousefood", default-features = false, features = ["fonts"] }
-ratatui = { version = "0.30.2", default-features = false }
+ratatui = { version = "0.30.2", default-features = false, features = ["layout-cache"] }
 
 critical-section = "1.2.0"
 badge-ui = { path = "ui" }
+embassy-usb = "0.6.0"
+embassy-sync = "0.8.0"
+embassy-futures = "0.1.2"
+static_cell = "2.1.1"
 
 [profile.release]
 opt-level = 3
