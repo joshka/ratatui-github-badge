@@ -39,3 +39,10 @@ qr = "https://ratatui.rs"
 idle_seconds = 30
 scene_seconds = 8
 weights = { fire = 1, plasma = 1, rain = 3, warp = 1 }
+
+# Networks the badge may join, tried in order. Omit `password` for an open network. Without
+# any `[[wifi]]` entries this defaults to the GitHub Universe attendee network below (its
+# password is shared with everyone at the event); `wifi = []` before any tables opts out.
+[[wifi]]
+ssid = "GitHub Events"
+password = "HelloWorld"

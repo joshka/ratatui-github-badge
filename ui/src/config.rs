@@ -6,4 +6,10 @@ pub struct Contact {
     pub qr: Qr,
 }
 
+/// A network the badge may join, in preference order. No password means an open network.
+pub struct Wifi {
+    pub ssid: &'static str,
+    pub password: Option<&'static str>,
+}
+
 include!(concat!(env!("OUT_DIR"), "/config.rs"));

@@ -29,6 +29,20 @@ struct Config {
     moods: Vec<String>,
     avatar: Option<PathBuf>,
     contacts: Vec<Contact>,
+    #[serde(default = "conference_wifi")]
+    wifi: Vec<Wifi>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Wifi {
+    ssid: String,
+    password: Option<String>,
+}
+
+/// GitHub Universe's attendee network; its password is shared with everyone at the event.
+fn conference_wifi() -> Vec<Wifi> {
+    vec![Wifi { ssid: "GitHub Events".into(), password: Some("HelloWorld".into()) }]
 }
 
 /// Ambient mode's scenes, in the order the UI expects their weights.
@@ -113,6 +127,11 @@ fn config(out_dir: &Path) -> String {
             println!("cargo:warning=QR for {label:?} is {width} modules; under 2 px each it may not scan. Shorten it.");
         }
         writeln!(out, "    Contact {{ label: {label:?}, qr: {} }},", qr(text)).unwrap();
+    }
+    writeln!(out, "];").unwrap();
+    writeln!(out, "pub const WIFI: &[Wifi] = &[").unwrap();
+    for Wifi { ssid, password } in &config.wifi {
+        writeln!(out, "    Wifi {{ ssid: {ssid:?}, password: {password:?} }},").unwrap();
     }
     writeln!(out, "];").unwrap();
     writeln!(out, "pub const AVATAR_SIDE: u32 = {AVATAR_SIDE};").unwrap();
